@@ -1,10 +1,26 @@
 import os
 import json
-import re
 import uuid
 import asyncio
+from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+
+# --- SERVIDOR WEB PARA CUMPLIR CON EL PUERTO DE RENDER ---
+async def handle_web(request):
+    return web.Response(text="Bot de Rifa Activo y en Línea 24/7!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_web)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"🌐 Servidor web corriendo en el puerto {port}")
+# ---------------------------------------------------------
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_TELEGRAM_ID = int(os.environ.get("ADMIN_TELEGRAM_ID", "0"))
@@ -288,6 +304,11 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def main():
     inicializar_rifa()
+    
+    # 1. Levanta el servidor web para satisfacer a Render
+    await start_web_server()
+
+    # 2. Inicia el bot de Telegram
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
@@ -295,14 +316,16 @@ async def main():
     app.add_handler(CallbackQueryHandler(boton_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
 
-    print("🤖 Bot iniciado correctamente...")
+    print("🤖 Bot de Rifa iniciado correctamente...")
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
 
+    # Mantiene el proceso activo
+    await asyncio.Event().wait()
+
 if __name__ == "__main__":
     asyncio.run(main())
-
 
 
 
