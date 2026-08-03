@@ -89,7 +89,6 @@ def generar_texto_lista():
             nombre = info.get("nombre", "Usuario")
             user_id = info.get("user_id")
             if user_id:
-                # Crea un enlace interactivo de Telegram que lleva directo al privado del usuario
                 texto += f"🔴 *{num_str}*: Ocupado por [{nombre}](tg://user?id={user_id})\n"
             else:
                 texto += f"🔴 *{num_str}*: Ocupado por {nombre}\n"
@@ -150,9 +149,9 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ganador_nombre = info_num.get("nombre")
     ganador_id = info_num.get("user_id")
     num_formateado = num_str.zfill(2)
-
-    # 1. Anuncio en el grupo con enlace interactivo al perfil del ganador
     ganador_mencion = f"[{ganador_nombre}](tg://user?id={ganador_id})" if ganador_id else ganador_nombre
+
+    # 1. Anuncio en el grupo
     msg_anuncio = (
         f"🏆 *¡RESULTADO OFICIAL DE LA RIFA!* 🏆\n\n"
         f"🎯 El número ganador es el: *{num_formateado}*\n\n"
@@ -169,8 +168,36 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Por favor, ponte en contacto con el administrador lo antes posible para reclamar tu premio. 🤝"
             )
             await context.bot.send_message(chat_id=ganador_id, text=msg_privado, parse_mode="Markdown")
+            print(f"Mensaje privado de ganador enviado con éxito a ID: {ganador_id}")
         except Exception as e:
-            print(f"No se pudo enviar mensaje privado al ganador: {e}")
+            print(f"⚠️ No se pudo enviar mensaje privado al ganador: {e}")
+
+async def bienvenida_nuevos_usuarios(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for nuevo_usuario in update.message.new_chat_members:
+        if nuevo_usuario.id == context.bot.id:
+            continue
+        
+        nombre = nuevo_usuario.first_name or "Amigo"
+        mencion = f"[{nombre}](tg://user?id={nuevo_usuario.id})"
+        bot_username = context.bot.username
+        
+        texto_bienvenida = (
+            f"👋 ¡Bienvenido/a {mencion} al grupo de la Rifa! 🎟️\n\n"
+            f"Para participar y separar tus números:\n"
+            f"1️⃣ Revisa la lista enviando o pidiendo la `lista`.\n"
+            f"2️⃣ Envía por aquí los números que deseas separados por coma (ejemplo: *7, 14*).\n"
+            f"3️⃣ Sigue las instrucciones para validar tu pago.\n\n"
+            f"⚠️ *IMPORTANTE:* Para que el bot pueda confirmarte tus jugadas por privado, toca el botón de abajo para iniciar el chat privado con él y dale a **Iniciar**."
+        )
+
+        # Botón interactivo que lleva directo al chat privado del bot
+        keyboard = [[InlineKeyboardButton("🤖 Iniciar Bot en Privado", url=f"https://t.me/{bot_username}?start=welcome")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        try:
+            await update.message.reply_text(texto_bienvenida, reply_markup=reply_markup, parse_mode="Markdown")
+        except Exception as e:
+            print(f"Error enviando bienvenida: {e}")
 
 async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -329,19 +356,20 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(f"✅ *Solicitud {req_id} APROBADA.* Números: {nums_formatted}", parse_mode="Markdown")
 
-        # 1. Aviso en el grupo con mención interactiva
+        # 1. Aviso en el grupo
         try:
             msg_grupo = f"🎉 *¡PAGO CONFIRMADO!* 🎉\n\n👤 *Usuario:* {usuario_mencion}\n🎟️ *Números asignados:* *{nums_formatted}*\n\n¡Muchas felicidades! 🤝"
             await context.bot.send_message(chat_id=chat_origen, text=msg_grupo, parse_mode="Markdown")
         except Exception as e:
             print(f"Error enviando aviso al grupo: {e}")
 
-        # 2. Notificación en privado al usuario de que su pago fue aprobado
+        # 2. Notificación en privado al usuario
         try:
             msg_privado = f"✅ *¡PAGO APROBADO!* 🎉\n\nHola {user_nombre}, tu pago ha sido verificado. Tus números (*{nums_formatted}*) ya están registrados oficialmente a tu nombre.\n\n¡Mucha suerte en la rifa! 🍀"
             await context.bot.send_message(chat_id=user_id, text=msg_privado, parse_mode="Markdown")
+            print(f"Privado de aprobación enviado a ID: {user_id}")
         except Exception as e:
-            print(f"Error enviando privado de confirmación: {e}")
+            print(f"⚠️ No se pudo enviar privado de aprobación: {e}")
 
     elif accion == "rech":
         for n in user_nums:
@@ -361,12 +389,13 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"Error notificando rechazo en grupo: {e}")
 
-        # 2. Notificación en privado al usuario de que su pago fue rechazado
+        # 2. Notificación en privado al usuario
         try:
             msg_cancel_privado = f"❌ *SOLICITUD RECHAZADA* ❌\n\nHola {user_nombre}, lamentablemente tu pago para el/los número(s) *{nums_formatted}* fue rechazado y los números han sido liberados nuevamente."
             await context.bot.send_message(chat_id=user_id, text=msg_cancel_privado, parse_mode="Markdown")
+            print(f"Privado de rechazo enviado a ID: {user_id}")
         except Exception as e:
-            print(f"Error enviando privado de rechazo: {e}")
+            print(f"⚠️ No se pudo enviar privado de rechazo: {e}")
 
 async def main():
     inicializar_rifa()
@@ -380,6 +409,7 @@ async def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CommandHandler("ganador", ganador_command))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, bienvenida_nuevos_usuarios))
     app.add_handler(CallbackQueryHandler(boton_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
 
