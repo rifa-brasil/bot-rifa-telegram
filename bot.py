@@ -2,6 +2,7 @@ import os
 import json
 import re
 import uuid
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
@@ -285,7 +286,7 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"Error notificando rechazo: {e}")
 
-def main():
+async def main():
     inicializar_rifa()
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
@@ -295,8 +296,12 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
 
     print("🤖 Bot iniciado correctamente...")
-    app.run_polling()
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
+
+
 
