@@ -112,9 +112,59 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id != ADMIN_TELEGRAM_ID:
+        await update.message.reply_text("⛔ No estás autorizado para resetear la rifa.")
         return
+    
     borrar_y_recrear_base_datos()
     await update.message.reply_text("🔄 *¡La rifa ha sido reseteada con éxito!* Todos los números vuelven a estar disponibles.\n\n" + generar_texto_lista(), parse_mode="Markdown")
+
+async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_TELEGRAM_ID:
+        await update.message.reply_text("⛔ No estás autorizado para dar el resultado ganador.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ Por favor indica el número ganador. Ejemplo: `/ganador 14`", parse_mode="Markdown")
+        return
+
+    num_ingresado = context.args[0].strip()
+    if not num_ingresado.isdigit() or not (1 <= int(num_ingresado) <= 100):
+        await update.message.reply_text("⚠️ El número debe estar entre 1 y 100.", parse_mode="Markdown")
+        return
+
+    num_str = str(int(num_ingresado))
+    data_rifa = obtener_data_completa()
+    info_num = data_rifa["numeros"].get(num_str, {})
+
+    estado = info_num.get("estado")
+    if estado != "ocupado":
+        await update.message.reply_text(f"⚠️ El número *{num_ingresado.zfill(2)}* no está ocupado por ningún usuario (su estado es: *{estado}*).", parse_mode="Markdown")
+        return
+
+    ganador_nombre = info_num.get("nombre")
+    ganador_id = info_num.get("user_id")
+    num_formateado = num_str.zfill(2)
+
+    # 1. Anunciar en el grupo/chat actual el resultado
+    msg_anuncio = (
+        f"🏆 *¡RESULTADO OFICIAL DE LA RIFA!* 🏆\n\n"
+        f"🎯 El número ganador es el: *{num_formateado}*\n\n"
+        f"🎉 ¡El usuario *{ganador_nombre}* es el ganador de este número! Muchas felicidades. 🥳"
+    )
+    await update.message.reply_text(msg_anuncio, parse_mode="Markdown")
+
+    # 2. Enviar mensaje privado al ganador
+    if ganador_id:
+        try:
+            msg_privado = (
+                f"🎉 *¡FELICIDADES {ganador_nombre}!* 🎉\n\n"
+                f"¡Has ganado la rifa con tu número *{num_formateado}*! 🏆\n\n"
+                f"Por favor, ponte en contacto con el administrador lo antes posible para reclamar tu premio. 🤝"
+            )
+            await context.bot.send_message(chat_id=ganador_id, text=msg_privado, parse_mode="Markdown")
+        except Exception as e:
+            print(f"No se pudo enviar mensaje privado al ganador: {e}")
 
 async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -270,19 +320,22 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         guardar_data_completa(data_rifa)
 
+        # Actualiza el mensaje del admin
         await query.edit_message_text(f"✅ *Solicitud {req_id} APROBADA.* Números: {nums_formatted}", parse_mode="Markdown")
 
+        # 1. Enviar aviso oficial al grupo/chat de origen
         try:
             msg_grupo = f"🎉 *¡PAGO CONFIRMADO!* 🎉\n\n👤 *Usuario:* {user_nombre}\n🎟️ *Números asignados:* *{nums_formatted}*\n\n¡Muchas felicidades! 🤝"
             await context.bot.send_message(chat_id=chat_origen, text=msg_grupo, parse_mode="Markdown")
         except Exception as e:
-            print(f"Error enviando aviso: {e}")
+            print(f"Error enviando aviso al grupo: {e}")
 
+        # 2. Enviar mensaje privado al usuario indicando que su jugada fue confirmada
         try:
-            msg_privado = f"🎉 *¡Hola {user_nombre}!* 🎉\n\nTu pago ha sido verificado. Tus números (*{nums_formatted}*) ya están registrados oficialmente.\n\n¡Mucha suerte! 🍀"
+            msg_privado = f"✅ *¡PAGO APROBADO!* 🎉\n\nHola {user_nombre}, tu pago ha sido verificado por el administrador. Tus números (*{nums_formatted}*) ya están registrados oficialmente a tu nombre.\n\n¡Mucha suerte en la rifa! 🍀"
             await context.bot.send_message(chat_id=user_id, text=msg_privado, parse_mode="Markdown")
         except Exception as e:
-            print(f"Error enviando privado: {e}")
+            print(f"Error enviando privado de confirmación: {e}")
 
     elif accion == "rech":
         for n in user_nums:
@@ -293,14 +346,22 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data_rifa["solicitudes_pendientes"] = solicitudes
         guardar_data_completa(data_rifa)
 
+        # Actualiza el mensaje del admin
         await query.edit_message_text(f"❌ *Solicitud {req_id} RECHAZADA.*", parse_mode="Markdown")
 
+        # 1. Enviar aviso al grupo/chat de origen de que se canceló
         try:
-            msg_cancel = f"⚠️ *SOLICITUD CANCELADA* ⚠️\n\nHola {user_nombre}, tu solicitud para el/los número(s) *{nums_formatted}* fue rechazada. Vuelven a estar 🟢 *Disponibles*."
-            await context.bot.send_message(chat_id=chat_origen, text=msg_cancel, parse_mode="Markdown")
-            await context.bot.send_message(chat_id=user_id, text=msg_cancel, parse_mode="Markdown")
+            msg_cancel_grupo = f"⚠️ *SOLICITUD RECHAZADA/CANCELADA* ⚠️\n\nEl pago de {user_nombre} para el/los número(s) *{nums_formatted}* no pudo ser verificado. Los números vuelven a estar 🟢 *Disponibles*."
+            await context.bot.send_message(chat_id=chat_origen, text=msg_cancel_grupo, parse_mode="Markdown")
         except Exception as e:
-            print(f"Error notificando rechazo: {e}")
+            print(f"Error notificando rechazo en grupo: {e}")
+
+        # 2. Enviar mensaje privado al usuario indicando que su jugada fue rechazada
+        try:
+            msg_cancel_privado = f"❌ *SOLICITUD RECHAZADA* ❌\n\nHola {user_nombre}, lamentablemente tu pago para el/los número(s) *{nums_formatted}* fue rechazado o no pudo confirmarse. Los números han sido liberados nuevamente."
+            await context.bot.send_message(chat_id=user_id, text=msg_cancel_privado, parse_mode="Markdown")
+        except Exception as e:
+            print(f"Error enviando privado de rechazo: {e}")
 
 async def main():
     inicializar_rifa()
@@ -313,6 +374,7 @@ async def main():
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("reset", reset_command))
+    app.add_handler(CommandHandler("ganador", ganador_command))
     app.add_handler(CallbackQueryHandler(boton_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
 
@@ -326,6 +388,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
 
