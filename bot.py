@@ -152,19 +152,25 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
    num_formateado = num_str.zfill(2)
    ganador_mencion = f"[{ganador_nombre}](tg://user?id={ganador_id})" if ganador_id else ganador_nombre
 
-   # Asegurar que se mantenga cerrado hasta nuevo reseteo
+   # Mantener bloqueado hasta el próximo reset
    data_rifa["estado_rifa"] = "finalizada"
    guardar_data_completa(data_rifa)
 
-   msg_anuncio = (
-       f"🏆 *¡RESULTADO OFICIAL DE GRAN SORTEO 100!* 🏆\n\n"
-       f"🎯 El Resultado de la Florida Pick 3 es el: *{num_formateado}*\n\n"
-       f"🎉 ¡El usuario {ganador_mencion} es el ganador de este número! Muchas felicidades. 🥳\n\n"
-       f"Por favor, póngase en contacto con el administrador @yordanisr para recibir su premio. "
-       f"Una vez que reciba la transferencia, le pedimos por favor que haga una captura de pantalla y la envíe a este grupo como evidencia de que recibió su pago y que todo funciona con total transparencia.\n\n"
-       f"🔒 *AVISO:* La lista permanece cerrada y no se podrán solicitar nuevos números hasta que el administrador resetee la lista."
+   # --- MENSAJE 1: RESULTADO OFICIAL ---
+   msg_resultado = (
+       f"🎯 *¡RESULTADO OFICIAL DE LA LOTERÍA!* 🎯\n\n"
+       f"El número ganador de la Florida Pick 3 es el: *{num_formateado}*"
    )
-   await update.message.reply_text(msg_anuncio, parse_mode="Markdown")
+   await update.message.reply_text(msg_resultado, parse_mode="Markdown")
+
+   # --- MENSAJE 2: ANUNCIO DEL GANADOR ---
+   msg_ganador = (
+       f"🎉 *¡Felicidades al Ganador!* 🎉\n\n"
+       f"El usuario {ganador_mencion} ha ganado con el número *{num_formateado}*. ¡Muchas felicidades! 🥳\n\n"
+       f"Por favor, póngase en contacto con el administrador @yordanisr para recibir su premio. "
+       f"Una vez que reciba la transferencia, le pedimos por favor que haga una captura de pantalla y la envíe a este grupo como evidencia de que recibió su pago y que todo funciona con total transparencia."
+   )
+   await update.message.reply_text(msg_ganador, parse_mode="Markdown")
 
    if ganador_id:
        try:
@@ -235,8 +241,8 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if es_lista_numeros:
        if estado_actual_rifa == "finalizada":
            await update.message.reply_text(
-               f"🔒 *Lo sentimos {nombre_usuario}, el sistema está cerrado.* "
-               f"No se permite escoger ni cambiar números hasta que el administrador resetee la lista.",
+               f"🔒 *Lo sentimos {nombre_usuario}, la lista está cerrada.* "
+               f"No se permite escoger números hasta que el administrador dé los resultados y proceda a resetear la lista.",
                parse_mode="Markdown"
            )
            return
@@ -388,7 +394,7 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
            msg_lista_llena = (
                f"🚨 *¡ATENCIÓN COMUNIDAD!* 🚨\n\n"
                f"🎟️ ¡Se han ocupado todos los números de la lista!\n"
-               f"🔒 La lista ha sido **bloqueada automáticamente** para evitar cambios o nuevas selecciones.\n\n"
+               f"🔒 La lista ha sido **bloqueada automáticamente** y permanecerá cerrada hasta que se dé el resultado y el administrador proceda a resetearla.\n\n"
                f"🎯 El resultado {aviso_tiempo}. ¡Estén atentos! 🍀"
            )
            try:
