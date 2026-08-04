@@ -151,11 +151,13 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     num_formateado = num_str.zfill(2)
     ganador_mencion = f"[{ganador_nombre}](tg://user?id={ganador_id})" if ganador_id else ganador_nombre
 
-    # 1. Anuncio en el grupo
+    # 1. Anuncio en el grupo con la indicación del premio y captura de evidencia
     msg_anuncio = (
         f"🏆 *¡RESULTADO OFICIAL DE LA RIFA!* 🏆\n\n"
         f"🎯 El número ganador es el: *{num_formateado}*\n\n"
-        f"🎉 ¡El usuario {ganador_mencion} es el ganador de este número! Muchas felicidades. 🥳"
+        f"🎉 ¡El usuario {ganador_mencion} es el ganador de este número! Muchas felicidades. 🥳\n\n"
+        f"Por favor, póngase en contacto con el administrador @jordanyr para recibir su premio. "
+        f"Una vez que reciba la transferencia, le pedimos por favor que haga una captura de pantalla y la envíe a este grupo como evidencia de que recibió su pago y que todo funciona con total transparencia."
     )
     await update.message.reply_text(msg_anuncio, parse_mode="Markdown")
 
@@ -165,7 +167,8 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg_privado = (
                 f"🎉 *¡FELICIDADES {ganador_nombre}!* 🎉\n\n"
                 f"¡Has ganado la rifa con tu número *{num_formateado}*! 🏆\n\n"
-                f"Por favor, ponte en contacto con el administrador lo antes posible para reclamar tu premio. 🤝"
+                f"Por favor, ponte en contacto con el administrador @jordanyr para recibir tu premio. "
+                f"Una vez que recibas la transferencia, haz una captura de pantalla y envíala al grupo como evidencia de que todo funciona con transparencia. 🤝"
             )
             await context.bot.send_message(chat_id=ganador_id, text=msg_privado, parse_mode="Markdown")
         except Exception as e:
@@ -416,4 +419,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
