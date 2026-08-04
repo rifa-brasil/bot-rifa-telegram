@@ -168,7 +168,6 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Por favor, ponte en contacto con el administrador lo antes posible para reclamar tu premio. 🤝"
             )
             await context.bot.send_message(chat_id=ganador_id, text=msg_privado, parse_mode="Markdown")
-            print(f"Mensaje privado de ganador enviado con éxito a ID: {ganador_id}")
         except Exception as e:
             print(f"⚠️ No se pudo enviar mensaje privado al ganador: {e}")
 
@@ -179,23 +178,17 @@ async def bienvenida_nuevos_usuarios(update: Update, context: ContextTypes.DEFAU
         
         nombre = nuevo_usuario.first_name or "Amigo"
         mencion = f"[{nombre}](tg://user?id={nuevo_usuario.id})"
-        bot_username = context.bot.username
         
         texto_bienvenida = (
             f"👋 ¡Bienvenido/a {mencion} al grupo de la Rifa! 🎟️\n\n"
             f"Para participar y separar tus números:\n"
             f"1️⃣ Revisa la lista enviando o pidiendo la `lista`.\n"
             f"2️⃣ Envía por aquí los números que deseas separados por coma (ejemplo: *7, 14*).\n"
-            f"3️⃣ Sigue las instrucciones para validar tu pago.\n\n"
-            f"⚠️ *IMPORTANTE:* Para que el bot pueda confirmarte tus jugadas por privado, toca el botón de abajo para iniciar el chat privado con él y dale a **Iniciar**."
+            f"3️⃣ Sigue las instrucciones para validar tu pago y listo. ¡Mucha suerte! 🍀"
         )
-
-        # Botón interactivo que lleva directo al chat privado del bot
-        keyboard = [[InlineKeyboardButton("🤖 Iniciar Bot en Privado", url=f"https://t.me/{bot_username}?start=welcome")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
         
         try:
-            await update.message.reply_text(texto_bienvenida, reply_markup=reply_markup, parse_mode="Markdown")
+            await update.message.reply_text(texto_bienvenida, parse_mode="Markdown")
         except Exception as e:
             print(f"Error enviando bienvenida: {e}")
 
@@ -281,7 +274,9 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             nums_solicitados_txt = ", ".join([n.zfill(2) for n in validos_para_reservar])
 
             await update.message.reply_text(
-                f"⏳ *SOLICITUD RECIBIDA* ⏳\n\nHola {nombre_usuario}, tus números (*{nums_solicitados_txt}*) están *reservados temporalmente* mientras el administrador verifica tu pago.",
+                f"⏳ *SOLICITUD EN PROCESO* ⏳\n\n"
+                f"Hola {nombre_usuario}, tus números (*{nums_solicitados_txt}*) están *reservados temporalmente*.\n\n"
+                f"Por favor, póngase en contacto con el administrador @jordanyr para realizar la transferencia.",
                 parse_mode="Markdown"
             )
 
@@ -367,7 +362,6 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             msg_privado = f"✅ *¡PAGO APROBADO!* 🎉\n\nHola {user_nombre}, tu pago ha sido verificado. Tus números (*{nums_formatted}*) ya están registrados oficialmente a tu nombre.\n\n¡Mucha suerte en la rifa! 🍀"
             await context.bot.send_message(chat_id=user_id, text=msg_privado, parse_mode="Markdown")
-            print(f"Privado de aprobación enviado a ID: {user_id}")
         except Exception as e:
             print(f"⚠️ No se pudo enviar privado de aprobación: {e}")
 
@@ -393,7 +387,6 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             msg_cancel_privado = f"❌ *SOLICITUD RECHAZADA* ❌\n\nHola {user_nombre}, lamentablemente tu pago para el/los número(s) *{nums_formatted}* fue rechazado y los números han sido liberados nuevamente."
             await context.bot.send_message(chat_id=user_id, text=msg_cancel_privado, parse_mode="Markdown")
-            print(f"Privado de rechazo enviado a ID: {user_id}")
         except Exception as e:
             print(f"⚠️ No se pudo enviar privado de rechazo: {e}")
 
@@ -423,5 +416,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
