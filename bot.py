@@ -95,9 +95,23 @@ def generar_texto_lista():
                texto += f"🔴 *{num_str}*: Ocupado por {nombre}\n"
             
    texto += f"\n📊 *Resumen:* Quedan {disponibles} números disponibles."
-   if data.get("estado_rifa") == "finalizada":
+   estado_actual = data.get("estado_rifa")
+   if estado_actual == "finalizada":
        texto += "\n\n🔒 *ESTADO:* Rifa cerrada/finalizada."
+   elif estado_actual == "bloqueada":
+       texto += "\n\n⛔ *ESTADO:* Rifa temporalmente bloqueada por el administrador."
    return texto
+
+TEXTO_REGLAS_OFICIAL = (
+   "📌 *REGLAS Y DINÁMICA DEL GRUPO (Gran Sorteo 100):*\n\n"
+   "1️⃣ *Respeto:* Mantén un ambiente de respeto absoluto hacia todos los miembros de la comunidad y administradores.\n"
+   "2️⃣ *Números y Costo:* Disponemos de una tabla con *100 números* (del 01 al 100). Cada número tiene un valor de *20 reales*. Envía la palabra `lista` para ver los disponibles y escribe los que deseas separados por coma (ej: *7, 14*) aquí o en el grupo.\n"
+   "3️⃣ *Condición del Sorteo:* El sorteo se realizará **únicamente cuando los 100 números estén 100% ocupados y pagados**. Esto puede demorar varios días dependiendo de la rapidez en que los usuarios escojan y ocupen los números.\n"
+   "4️⃣ *Garantía de Devolución:* Si algún participante adquiere sus números pero **no desea esperar**, puede ponerse en contacto con el administrador (@yordanisr) en cualquier momento para solicitar la **devolución íntegra de su dinero**.\n"
+   "5️⃣ *Entrega del Premio:* El usuario ganador recibirá un premio de *1000 reales*. Este pago se efectuará según prefiera el ganador: mediante transferencia vía PIX, o si lo prefiere, se le hará entrega en Cuba en CUP a su familiar según el tipo de cambio vigente en el grupo de Remesas del administrador. (Para conocer esta información y tasa de cambio, es obligatorio unirse al grupo de WhatsApp del administrador: https://chat.whatsapp.com/HEaEIKaEjksJRrWEKcIVEo?s=sh&p=a&ilr=0).\n"
+   "6️⃣ *Transparencia:* El ganador se define utilizando los resultados oficiales de la *Lotería de Florida* (Pick 3) en el horario nocturno.\n\n"
+   "🤝 *¡Ayúdanos a crecer!* Puedes invitar a otros usuarios a unirse al grupo mediante este enlace: https://t.me/+didZDftOZAhmZjdh para que participen en el sorteo."
+)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
    user = update.effective_user
@@ -113,6 +127,38 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
        respuesta += "\n\n👉 *¿Cómo comprar?* Envía los números que deseas separados por coma (ej: *7, 14*) aquí o en el grupo."
     
    await update.message.reply_text(respuesta, parse_mode="Markdown")
+
+async def reglas_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   mensaje_reglas = f"🎯 *REGLAS OFICIALES - Gran Sorteo 100* 🎟️\n\n{TEXTO_REGLAS_OFICIAL}"
+   await update.message.reply_text(mensaje_reglas, parse_mode="Markdown")
+
+async def bloquear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   user = update.effective_user
+   if user.id != ADMIN_TELEGRAM_ID:
+       await update.message.reply_text("⛔ No estás autorizado para bloquear la rifa.")
+       return
+
+   data_rifa = obtener_data_completa()
+   data_rifa["estado_rifa"] = "bloqueada"
+   guardar_data_completa(data_rifa)
+
+   await update.message.reply_text("⛔ *La rifa ha sido bloqueada temporalmente.* Ningún usuario podrá escoger números nuevos hasta que el administrador la desbloquee. (Los datos existentes están seguros).", parse_mode="Markdown")
+
+async def desbloquear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   user = update.effective_user
+   if user.id != ADMIN_TELEGRAM_ID:
+       await update.message.reply_text("⛔ No estás autorizado para desbloquear la rifa.")
+       return
+
+   data_rifa = obtener_data_completa()
+   if data_rifa.get("estado_rifa") == "finalizada":
+       await update.message.reply_text("⚠️ La rifa se encuentra finalizada por un sorteo completado. Si deseas reiniciar todo desde cero, usa `/reset`.", parse_mode="Markdown")
+       return
+
+   data_rifa["estado_rifa"] = "activa"
+   guardar_data_completa(data_rifa)
+
+   await update.message.reply_text("🟢 *La rifa ha sido desbloqueada.* Ya se pueden escoger números nuevamente con total normalidad.\n\n" + generar_texto_lista(), parse_mode="Markdown")
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
    user = update.effective_user
@@ -231,14 +277,7 @@ async def bienvenida_nuevos_usuarios(update: Update, context: ContextTypes.DEFAU
        texto_bienvenida = (
            f"🎯 *¡Bienvenido/a {mencion} a Gran Sorteo 100!* 🎟️\n\n"
            f"Nos alegra mucho tenerte por aquí. Este es un espacio exclusivo y transparente para participar por grandes premios en efectivo.\n\n"
-           f"📌 *REGLAS Y DINÁMICA DEL GRUPO:*\n"
-           f"1️⃣ *Respeto:* Mantén un ambiente de respeto absoluto hacia todos los miembros de la comunidad y administradores.\n"
-           f"2️⃣ *Números y Costo:* Disponemos de una tabla con *100 números* (del 01 al 100). Cada número tiene un valor de *20 reales*. Envía la palabra `lista` para ver los disponibles y escribe los que deseas separados por coma (ej: *7, 14*) aquí o en el grupo.\n"
-           f"3️⃣ *Condición del Sorteo:* El sorteo se realizará **únicamente cuando los 100 números estén 100% ocupados y pagados**. Esto puede demorar varios días dependiendo de la rapidez en que los usuarios escojan y ocupen los números.\n"
-           f"4️⃣ *Garantía de Devolución:* Si algún participante adquiere sus números pero **no desea esperar**, puede ponerse en contacto con el administrador (@yordanisr) en cualquier momento para solicitar la **devolución íntegra de su dinero**.\n"
-           f"5️⃣ *Entrega del Premio:* El usuario ganador recibirá un premio de *1000 reales*. Este pago se efectuará según prefiera el ganador: mediante transferencia vía PIX, o si lo prefiere, se le hará entrega en Cuba en CUP a su familiar según el tipo de cambio vigente en el grupo de Remesas del administrador. (Para conocer esta información y tasa de cambio, es obligatorio unirse al grupo de WhatsApp del administrador: https://chat.whatsapp.com/HEaEIKaEjksJRrWEKcIVEo?s=sh&p=a&ilr=0).\n"
-           f"6️⃣ *Transparencia:* El ganador se define utilizando los resultados oficiales de la *Lotería de Florida* (Pick 3) en el horario nocturno.\n\n"
-           f"🤝 *¡Ayúdanos a crecer!* Puedes invitar a otros usuarios a unirse al grupo mediante este enlace: https://t.me/+didZDftOZAhmZjdh para que participen en el sorteo. Entre más entren y jueguen, más rápido se dará el resultado y obtendrán su premio.\n\n"
+           f"{TEXTO_REGLAS_OFICIAL}\n\n"
            f"¡Mucha suerte y gracias por formar parte de *Gran Sorteo 100*! 🍀✨"
        )
        
@@ -278,6 +317,14 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
            await update.message.reply_text(
                f"🔒 *Lo sentimos {nombre_usuario}, la lista está cerrada.* "
                f"No se permite escoger números hasta que el administrador dé los resultados y proceda a resetear la lista.",
+               parse_mode="Markdown"
+           )
+           return
+       
+       if estado_actual_rifa == "bloqueada":
+           await update.message.reply_text(
+               f"⛔ *Lo sentimos {nombre_usuario}, la rifa se encuentra temporalmente bloqueada.* "
+               f"En este momento no se pueden apartar números hasta que el administrador la habilite nuevamente.",
                parse_mode="Markdown"
            )
            return
@@ -335,7 +382,7 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
            await update.message.reply_text(
                f"⏳ *SOLICITUD EN PROCESO* ⏳\n\n"
                f"Hola {nombre_usuario}, tus números (*{nums_solicitados_txt}*) están *reservados temporalmente*.\n\n"
-               f"Por favor, póngase en contacto con el administrador @yordanisr para realizar la transferencia.",
+               f"Por favor, póngase en contacto con el administrador @yordanisr para realizar la transferencia de los 20 reales por número.",
                parse_mode="Markdown"
            )
 
@@ -472,6 +519,9 @@ async def main():
    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
    app.add_handler(CommandHandler("start", start_command))
+   app.add_handler(CommandHandler("reglas", reglas_command))
+   app.add_handler(CommandHandler("bloquear", bloquear_command))
+   app.add_handler(CommandHandler("desbloquear", desbloquear_command))
    app.add_handler(CommandHandler("reset", reset_command))
    app.add_handler(CommandHandler("ganador", ganador_command))
    app.add_handler(CommandHandler("liberar", liberar_command))
