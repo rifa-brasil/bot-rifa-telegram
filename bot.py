@@ -123,6 +123,46 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
    borrar_y_recrear_base_datos()
    await update.message.reply_text("🔄 *¡Gran Sorteo 100 ha sido reseteado con éxito!* Todos los números vuelven a estar disponibles.\n\n" + generar_texto_lista(), parse_mode="Markdown")
 
+async def liberar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   user = update.effective_user
+   if user.id != ADMIN_TELEGRAM_ID:
+       await update.message.reply_text("⛔ No estás autorizado para liberar números.")
+       return
+
+   if not context.args:
+       await update.message.reply_text("⚠️ Por favor indica el nombre o parte del nombre del usuario a liberar. Ejemplo: `/liberar Juan`", parse_mode="Markdown")
+       return
+
+   nombre_buscar = " ".join(context.args).strip().lower()
+   data_rifa = obtener_data_completa()
+   rifa = data_rifa["numeros"]
+
+   numeros_liberados = []
+   for num_str, info in rifa.items():
+       if info.get("estado") == "ocupado":
+           nombre_usuario_reg = info.get("nombre", "").lower()
+           if nombre_buscar in nombre_usuario_reg:
+               numeros_liberados.append(num_str.zfill(2))
+               rifa[num_str] = {"estado": "disponible", "nombre": "", "user_id": "", "username": ""}
+
+   if not numeros_liberados:
+       await update.message.reply_text(f"⚠️ No se encontraron números ocupados asociados a un usuario que coincida con: *{nombre_buscar}*.", parse_mode="Markdown")
+       return
+
+   # Si la rifa estaba cerrada/finalizada por estar llena, la reactivamos al liberar números
+   if data_rifa.get("estado_rifa") == "finalizada":
+       data_rifa["estado_rifa"] = "activa"
+
+   data_rifa["numeros"] = rifa
+   guardar_data_completa(data_rifa)
+
+   nums_str_lib = ", ".join(numeros_liberados)
+   msg_liberar = (
+       f"🔄 *DEVOLUCIÓN Y LIBERACIÓN DE NÚMEROS* 🔄\n\n"
+       f"Se han procesado las devoluciones correspondientes. El/los número(s) *{nums_str_lib* (del usuario *{nombre_buscar.capitalize()}*) han sido liberados y vuelven a estar 🟢 *Disponibles* en la lista."
+   )
+   await update.message.reply_text(msg_liberar, parse_mode="Markdown")
+
 async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
    user = update.effective_user
    if user.id != ADMIN_TELEGRAM_ID:
@@ -152,7 +192,6 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
    num_formateado = num_str.zfill(2)
    ganador_mencion = f"[{ganador_nombre}](tg://user?id={ganador_id})" if ganador_id else ganador_nombre
 
-   # Mantener bloqueado hasta el próximo reset
    data_rifa["estado_rifa"] = "finalizada"
    guardar_data_completa(data_rifa)
 
@@ -195,15 +234,12 @@ async def bienvenida_nuevos_usuarios(update: Update, context: ContextTypes.DEFAU
        texto_bienvenida = (
            f"🎯 *¡Bienvenido/a {mencion} a Gran Sorteo 100!* 🎟️\n\n"
            f"Nos alegra mucho tenerte por aquí. Este es un espacio exclusivo y transparente para participar por grandes premios en efectivo.\n\n"
-           f"A continuación, te explicamos cómo funciona la dinámica:\n"
-           f"* 🔢 *Los Números:* Disponemos de una tabla con *100 números* (del 00 al 99). Cada participante puede elegir uno o varios números según su preferencia.\n"
-           f"* 💵 *Valor:* Cada número tiene un costo de *10 a 20 reales*.\n"
-           f"* 🏆 *El Premio:* Una vez que se ocupen los 100 números y se confirme el pago de todos, anunciaremos la fecha oficial del evento. El premio en efectivo va desde *400 hasta 1,000 reales*.\n"
-           f"* ⚖️ *Transparencia Total:* El ganador se define de manera 100% transparente utilizando los resultados oficiales de la *Lotería de Florida*.\n\n"
-           f"📌 *Reglas del Grupo:*\n"
-           f"1. Respetar a todos los miembros de la comunidad.\n"
-           f"2. Para apartar un número, consulta los disponibles enviando la palabra `lista` y envía tu comprobante de pago.\n"
-           f"3. Los números solo se consideran vendidos y asegurados una vez confirmado el pago.\n\n"
+           f"📌 *REGLAS Y DINÁMICA DEL GRUPO:*\n"
+           f"1️⃣ *Respeto:* Mantén un ambiente de respeto absoluto hacia todos los miembros de la comunidad y administradores.\n"
+           f"2️⃣ *Números:* Disponemos de una tabla con *100 números* (del 01 al 100). Envía la palabra `lista` para ver los disponibles y escribe los que deseas separados por coma (ej: *7, 14*) aquí o en el grupo.\n"
+           f"3️⃣ *Condición del Sorteo:* El sorteo se realizará **únicamente cuando los 100 números estén 100% ocupados y pagados**. No hay fecha fija: puede tomar días o semanas según la velocidad de venta.\n"
+           f"4️⃣ *Garantía de Devolución:* Si algún participante adquiere sus números pero **no desea esperar**, puede ponerse en contacto con el administrador (@yordanisr) en cualquier momento para solicitar la **devolución íntegra de su dinero**.\n"
+           f"5️⃣ *Transparencia:* El ganador se define utilizando los resultados oficiales de la *Lotería de Florida* (Pick 3) en el horario nocturno.\n\n"
            f"¡Mucha suerte y gracias por formar parte de *Gran Sorteo 100*! 🍀✨"
        )
        
@@ -368,7 +404,6 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
        data_rifa["numeros"] = rifa
        data_rifa["solicitudes_pendientes"] = solicitudes
 
-       # DETECCIÓN AUTOMÁTICA DE LISTA LLENA
        lista_completa = all(rifa[str(n)]["estado"] == "ocupado" for n in range(1, 101))
        if lista_completa:
            data_rifa["estado_rifa"] = "finalizada"
@@ -383,7 +418,6 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
        except Exception as e:
            print(f"Error enviando aviso al grupo: {e}")
 
-       # NOTIFICACIÓN AUTOMÁTICA AL GRUPO CUANDO SE LLENA EL ÚLTIMO NÚMERO
        if lista_completa:
            hora_actual = datetime.now().hour
            if hora_actual < 21:
@@ -441,6 +475,7 @@ async def main():
    app.add_handler(CommandHandler("start", start_command))
    app.add_handler(CommandHandler("reset", reset_command))
    app.add_handler(CommandHandler("ganador", ganador_command))
+   app.add_handler(CommandHandler("liberar", liberar_command))
    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, bienvenida_nuevos_usuarios))
    app.add_handler(CallbackQueryHandler(boton_callback))
    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
