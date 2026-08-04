@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 import asyncio
+from datetime import datetime
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
@@ -151,12 +152,17 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
    num_formateado = num_str.zfill(2)
    ganador_mencion = f"[{ganador_nombre}](tg://user?id={ganador_id})" if ganador_id else ganador_nombre
 
+   # Asegurar que se mantenga cerrado hasta nuevo reseteo
+   data_rifa["estado_rifa"] = "finalizada"
+   guardar_data_completa(data_rifa)
+
    msg_anuncio = (
        f"🏆 *¡RESULTADO OFICIAL DE GRAN SORTEO 100!* 🏆\n\n"
        f"🎯 El Resultado de la Florida Pick 3 es el: *{num_formateado}*\n\n"
        f"🎉 ¡El usuario {ganador_mencion} es el ganador de este número! Muchas felicidades. 🥳\n\n"
        f"Por favor, póngase en contacto con el administrador @yordanisr para recibir su premio. "
-       f"Una vez que reciba la transferencia, le pedimos por favor que haga una captura de pantalla y la envíe a este grupo como evidencia de que recibió su pago y que todo funciona con total transparencia."
+       f"Una vez que reciba la transferencia, le pedimos por favor que haga una captura de pantalla y la envíe a este grupo como evidencia de que recibió su pago y que todo funciona con total transparencia.\n\n"
+       f"🔒 *AVISO:* La lista permanece cerrada y no se podrán solicitar nuevos números hasta que el administrador resetee la lista."
    )
    await update.message.reply_text(msg_anuncio, parse_mode="Markdown")
 
@@ -228,7 +234,11 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
    if es_lista_numeros:
        if estado_actual_rifa == "finalizada":
-           await update.message.reply_text("🔒 *Lo sentimos, el sistema está cerrado.*", parse_mode="Markdown")
+           await update.message.reply_text(
+               f"🔒 *Lo sentimos {nombre_usuario}, el sistema está cerrado.* "
+               f"No se permite escoger ni cambiar números hasta que el administrador resetee la lista.",
+               parse_mode="Markdown"
+           )
            return
 
        ocupados, pendientes, validos_para_reservar, invalidos = [], [], [], []
@@ -352,7 +362,9 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
        data_rifa["numeros"] = rifa
        data_rifa["solicitudes_pendientes"] = solicitudes
 
-       if all(rifa[str(n)]["estado"] == "ocupado" for n in range(1, 101)):
+       # DETECCIÓN AUTOMÁTICA DE LISTA LLENA
+       lista_completa = all(rifa[str(n)]["estado"] == "ocupado" for n in range(1, 101))
+       if lista_completa:
            data_rifa["estado_rifa"] = "finalizada"
 
        guardar_data_completa(data_rifa)
@@ -364,6 +376,25 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
            await context.bot.send_message(chat_id=chat_origen, text=msg_grupo, parse_mode="Markdown")
        except Exception as e:
            print(f"Error enviando aviso al grupo: {e}")
+
+       # NOTIFICACIÓN AUTOMÁTICA AL GRUPO CUANDO SE LLENA EL ÚLTIMO NÚMERO
+       if lista_completa:
+           hora_actual = datetime.now().hour
+           if hora_actual < 21:
+               aviso_tiempo = "será **esta misma noche** en el tiro de la Florida"
+           else:
+               aviso_tiempo = "será **al día siguiente** en el tiro de la Florida de la noche"
+
+           msg_lista_llena = (
+               f"🚨 *¡ATENCIÓN COMUNIDAD!* 🚨\n\n"
+               f"🎟️ ¡Se han ocupado todos los números de la lista!\n"
+               f"🔒 La lista ha sido **bloqueada automáticamente** para evitar cambios o nuevas selecciones.\n\n"
+               f"🎯 El resultado {aviso_tiempo}. ¡Estén atentos! 🍀"
+           )
+           try:
+               await context.bot.send_message(chat_id=chat_origen, text=msg_lista_llena, parse_mode="Markdown")
+           except Exception as e:
+               print(f"Error enviando aviso de lista llena: {e}")
 
        try:
            msg_privado = f"✅ *¡PAGO APROBADO!* 🎉\n\nHola {user_nombre}, tu pago ha sido verificado. Tus números (*{nums_formatted}*) ya están registrados oficialmente a tu nombre en Gran Sorteo 100.\n\n¡Mucha suerte! 🍀"
