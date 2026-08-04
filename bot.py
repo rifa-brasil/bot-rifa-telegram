@@ -187,7 +187,9 @@ async def bienvenida_nuevos_usuarios(update: Update, context: ContextTypes.DEFAU
             f"Para participar y separar tus números:\n"
             f"1️⃣ Revisa la lista enviando o pidiendo la `lista`.\n"
             f"2️⃣ Envía por aquí los números que deseas separados por coma (ejemplo: *7, 14*).\n"
-            f"3️⃣ Sigue las instrucciones para validar tu pago y listo. ¡Mucha suerte! 🍀"
+            f"3️⃣ Sigue las instrucciones para validar tu pago.\n\n"
+            f"🎲 *¿Cómo se elige el ganador?*\n"
+            f"Una vez que se ocupen los 100 números de la lista, el número ganador se escogerá del resultado de la **Florida del Pick 3** al día siguiente en la noche. ¡Mucha suerte! 🍀"
         )
         
         try:
@@ -419,5 +421,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
 
 
