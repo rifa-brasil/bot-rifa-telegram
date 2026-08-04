@@ -154,7 +154,7 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 1. Anuncio en el grupo con la indicación del premio y captura de evidencia
     msg_anuncio = (
         f"🏆 *¡RESULTADO OFICIAL DE LA RIFA!* 🏆\n\n"
-        f"🎯 El número ganador es el: *{num_formateado}*\n\n"
+        f"🎯 El Resultado de la Florida Pick 3 es el: *{num_formateado}*\n\n"
         f"🎉 ¡El usuario {ganador_mencion} es el ganador de este número! Muchas felicidades. 🥳\n\n"
         f"Por favor, póngase en contacto con el administrador @yordanisr para recibir su premio. "
         f"Una vez que haya recibido la transferencia, le pedimos por favor que haga una captura de pantalla y la envíe al grupo como evidencia de que recibió su pago y que todo funciona con total transparencia."
@@ -421,6 +421,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
 
