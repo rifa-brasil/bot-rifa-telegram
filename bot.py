@@ -149,7 +149,6 @@ async def liberar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
        await update.message.reply_text(f"⚠️ No se encontraron números ocupados asociados a un usuario que coincida con: *{nombre_buscar}*.", parse_mode="Markdown")
        return
 
-   # Si la rifa estaba cerrada/finalizada por estar llena, la reactivamos al liberar números
    if data_rifa.get("estado_rifa") == "finalizada":
        data_rifa["estado_rifa"] = "activa"
 
@@ -159,7 +158,7 @@ async def liberar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
    nums_str_lib = ", ".join(numeros_liberados)
    msg_liberar = (
        f"🔄 *DEVOLUCIÓN Y LIBERACIÓN DE NÚMEROS* 🔄\n\n"
-       f"Se han procesado las devoluciones correspondientes. El/los número(s) *{nums_str_lib* (del usuario *{nombre_buscar.capitalize()}*) han sido liberados y vuelven a estar 🟢 *Disponibles* en la lista."
+       f"Se han procesado las devoluciones correspondientes. El/los número(s) *{nums_str_lib}* (del usuario *{nombre_buscar.capitalize()}*) han sido liberados y vuelven a estar 🟢 *Disponibles* en la lista."
    )
    await update.message.reply_text(msg_liberar, parse_mode="Markdown")
 
@@ -195,14 +194,12 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
    data_rifa["estado_rifa"] = "finalizada"
    guardar_data_completa(data_rifa)
 
-   # --- MENSAJE 1: RESULTADO OFICIAL ---
    msg_resultado = (
        f"🎯 *¡RESULTADO OFICIAL DE LA LOTERÍA!* 🎯\n\n"
        f"El número ganador de la Florida Pick 3 es el: *{num_formateado}*"
    )
    await update.message.reply_text(msg_resultado, parse_mode="Markdown")
 
-   # --- MENSAJE 2: ANUNCIO DEL GANADOR ---
    msg_ganador = (
        f"🎉 *¡Felicidades al Ganador!* 🎉\n\n"
        f"El usuario {ganador_mencion} ha ganado con el número *{num_formateado}*. ¡Muchas felicidades! 🥳\n\n"
