@@ -154,10 +154,10 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 1. Anuncio en el grupo con la indicación del premio y captura de evidencia
     msg_anuncio = (
         f"🏆 *¡RESULTADO OFICIAL DE LA RIFA!* 🏆\n\n"
-        f"🎯 El Resultado de la Florida Pick 3 es el: *{num_formateado}*\n\n"
-        f"🎉 ¡El usuario {ganador_mencion} es el ganador de este número! 🎉 *¡MUCHAS FELICIDADES. 🥳\n\n"
-        f"Por favor, póngase en contacto con el administrador @yordanisr para recibir su premio. "
-        f"Por favor al recibir su premio haga una captura de pantalla y envíela al grupo como evidencia de que recibió su pago sin problemas y que todo funciona con total transparencia."
+        f"🎯 El número ganador es el: *{num_formateado}*\n\n"
+        f"🎉 ¡El usuario {ganador_mencion} es el ganador de este número! Muchas felicidades. 🥳\n\n"
+        f"Por favor, póngase en contacto con el administrador @jordanyr para recibir su premio. "
+        f"Una vez que reciba la transferencia, le pedimos por favor que haga una captura de pantalla y la envíe a este grupo como evidencia de que recibió su pago y que todo funciona con total transparencia."
     )
     await update.message.reply_text(msg_anuncio, parse_mode="Markdown")
 
@@ -167,7 +167,7 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg_privado = (
                 f"🎉 *¡FELICIDADES {ganador_nombre}!* 🎉\n\n"
                 f"¡Has ganado la rifa con tu número *{num_formateado}*! 🏆\n\n"
-                f"Por favor, ponte en contacto con el administrador @yordanisr para recibir tu premio. "
+                f"Por favor, ponte en contacto con el administrador @jordanyr para recibir tu premio. "
                 f"Una vez que recibas la transferencia, haz una captura de pantalla y envíala al grupo como evidencia de que todo funciona con transparencia. 🤝"
             )
             await context.bot.send_message(chat_id=ganador_id, text=msg_privado, parse_mode="Markdown")
@@ -185,8 +185,8 @@ async def bienvenida_nuevos_usuarios(update: Update, context: ContextTypes.DEFAU
         texto_bienvenida = (
             f"👋 ¡Bienvenido/a {mencion} al grupo de la Rifa! 🎟️\n\n"
             f"Para participar y separar tus números:\n"
-            f"1️⃣ Revisa la lista enviando al grupo la palabra: `lista`.\n"
-            f"2️⃣ Luego envía por aquí los números que deseas jugar separados por coma (ejemplo: *7, 14*).\n"
+            f"1️⃣ Revisa la lista enviando o pidiendo la `lista`.\n"
+            f"2️⃣ Envía por aquí los números que deseas separados por coma (ejemplo: *7, 14*).\n"
             f"3️⃣ Sigue las instrucciones para validar tu pago.\n\n"
             f"🎲 *¿Cómo se elige el ganador?*\n"
             f"Una vez que se ocupen los 100 números de la lista, el número ganador se escogerá del resultado de la **Florida del Pick 3** al día siguiente en la noche. ¡Mucha suerte! 🍀"
@@ -281,7 +281,7 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"⏳ *SOLICITUD EN PROCESO* ⏳\n\n"
                 f"Hola {nombre_usuario}, tus números (*{nums_solicitados_txt}*) están *reservados temporalmente*.\n\n"
-                f"Por favor, póngase en contacto con el administrador @yordanisr para que realice su transferencia.",
+                f"Por favor, póngase en contacto con el administrador @jordanyr para realizar la transferencia.",
                 parse_mode="Markdown"
             )
 
@@ -421,4 +421,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
