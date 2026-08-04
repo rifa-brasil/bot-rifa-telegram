@@ -185,7 +185,7 @@ async def bienvenida_nuevos_usuarios(update: Update, context: ContextTypes.DEFAU
         texto_bienvenida = (
             f"👋 ¡Bienvenido/a {mencion} al grupo de la Rifa! 🎟️\n\n"
             f"Para participar y separar tus números:\n"
-            f"1️⃣ Revisa la lista enviando o pidiendo la `lista`.\n"
+            f"1️⃣ Revisa la lista enviando la palabra: `lista`.\n"
             f"2️⃣ Envía por aquí los números que deseas separados por coma (ejemplo: *7, 14*).\n"
             f"3️⃣ Sigue las instrucciones para validar tu pago.\n\n"
             f"🎲 *¿Cómo se elige el ganador?*\n"
