@@ -156,7 +156,7 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🏆 *¡RESULTADO OFICIAL DE LA RIFA!* 🏆\n\n"
         f"🎯 El número ganador es el: *{num_formateado}*\n\n"
         f"🎉 ¡El usuario {ganador_mencion} es el ganador de este número! Muchas felicidades. 🥳\n\n"
-        f"Por favor, póngase en contacto con el administrador @jordanyr para recibir su premio. "
+        f"Por favor, póngase en contacto con el administrador @yordanisr para recibir su premio. "
         f"Una vez que reciba la transferencia, le pedimos por favor que haga una captura de pantalla y la envíe a este grupo como evidencia de que recibió su pago y que todo funciona con total transparencia."
     )
     await update.message.reply_text(msg_anuncio, parse_mode="Markdown")
@@ -167,7 +167,7 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg_privado = (
                 f"🎉 *¡FELICIDADES {ganador_nombre}!* 🎉\n\n"
                 f"¡Has ganado la rifa con tu número *{num_formateado}*! 🏆\n\n"
-                f"Por favor, ponte en contacto con el administrador @jordanyr para recibir tu premio. "
+                f"Por favor, ponte en contacto con el administrador @yordanisr para recibir tu premio. "
                 f"Una vez que recibas la transferencia, haz una captura de pantalla y envíala al grupo como evidencia de que todo funciona con transparencia. 🤝"
             )
             await context.bot.send_message(chat_id=ganador_id, text=msg_privado, parse_mode="Markdown")
@@ -281,7 +281,7 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"⏳ *SOLICITUD EN PROCESO* ⏳\n\n"
                 f"Hola {nombre_usuario}, tus números (*{nums_solicitados_txt}*) están *reservados temporalmente*.\n\n"
-                f"Por favor, póngase en contacto con el administrador @jordanyr para realizar la transferencia.",
+                f"Por favor, póngase en contacto con el administrador @yordanisr para realizar la transferencia.",
                 parse_mode="Markdown"
             )
 
@@ -421,5 +421,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
