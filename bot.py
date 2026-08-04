@@ -202,8 +202,8 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
    msg_ganador = (
        f"🎉 *¡Felicidades al Ganador!* 🎉\n\n"
-       f"El usuario {ganador_mencion} ha ganado con el número *{num_formateado}*. ¡Muchas felicidades! 🥳\n\n"
-       f"Por favor, póngase en contacto con el administrador @yordanisr para recibir su premio. "
+       f"El usuario {ganador_mencion} ha ganado con el número *{num_formateado}* un premio de *1000 reales*. ¡Muchas felicidades! 🥳\n\n"
+       f"Por favor, póngase en contacto con el administrador @yordanisr para recibir su premio (puede elegir que se le transfiera vía PIX o que se le envíe a su familiar en Cuba). "
        f"Una vez que reciba la transferencia, le pedimos por favor que haga una captura de pantalla y la envíe a este grupo como evidencia de que recibió su pago y que todo funciona con total transparencia."
    )
    await update.message.reply_text(msg_ganador, parse_mode="Markdown")
@@ -212,8 +212,8 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
        try:
            msg_privado = (
                f"🎉 *¡FELICIDADES {ganador_nombre}!* 🎉\n\n"
-               f"¡Has ganado Gran Sorteo 100 con tu número *{num_formateado}*! 🏆\n\n"
-               f"Por favor, ponte en contacto con el administrador @yordanisr para recibir tu premio. "
+               f"¡Has ganado Gran Sorteo 100 con tu número *{num_formateado}* llevándote un premio de *1000 reales*! 🏆\n\n"
+               f"Por favor, ponte en contacto con el administrador @yordanisr para recibir tu premio (puedes elegir transferencia vía PIX o envío a tu familiar en Cuba). "
                f"Una vez que recibas la transferencia, haz una captura de pantalla y envíala al grupo como evidencia de que todo funciona con transparencia. 🤝"
            )
            await context.bot.send_message(chat_id=ganador_id, text=msg_privado, parse_mode="Markdown")
@@ -233,10 +233,10 @@ async def bienvenida_nuevos_usuarios(update: Update, context: ContextTypes.DEFAU
            f"Nos alegra mucho tenerte por aquí. Este es un espacio exclusivo y transparente para participar por grandes premios en efectivo.\n\n"
            f"📌 *REGLAS Y DINÁMICA DEL GRUPO:*\n"
            f"1️⃣ *Respeto:* Mantén un ambiente de respeto absoluto hacia todos los miembros de la comunidad y administradores.\n"
-           f"2️⃣ *Números:* Disponemos de una tabla con *100 números* (del 01 al 100). Envía la palabra `lista` para ver los disponibles y escribe los que deseas separados por coma (ej: *7, 14*) aquí o en el grupo.\n"
+           f"2️⃣ *Números y Costo:* Disponemos de una tabla con *100 números* (del 01 al 100). Cada número tiene un valor de *20 reales*. Envía la palabra `lista` para ver los disponibles y escribe los que deseas separados por coma (ej: *7, 14*) aquí o en el grupo.\n"
            f"3️⃣ *Condición del Sorteo:* El sorteo se realizará **únicamente cuando los 100 números estén 100% ocupados y pagados**. Esto puede demorar varios días dependiendo de la rapidez en que los usuarios escojan y ocupen los números.\n"
            f"4️⃣ *Garantía de Devolución:* Si algún participante adquiere sus números pero **no desea esperar**, puede ponerse en contacto con el administrador (@yordanisr) en cualquier momento para solicitar la **devolución íntegra de su dinero**.\n"
-           f"5️⃣ *Entrega del Premio:* El pago del premio se efectuará mediante transferencia vía PIX, o si el usuario lo prefiere, se le hará entrega en Cuba en CUP a su familiar según el tipo de cambio vigente en el grupo de Remesas del administrador. (Para conocer esta información y tasa de cambio, es obligatorio unirse al grupo de WhatsApp del administrador: https://chat.whatsapp.com/HEaEIKaEjksJRrWEKcIVEo?s=sh&p=a&ilr=0).\n"
+           f"5️⃣ *Entrega del Premio:* El usuario ganador recibirá un premio de *1000 reales*. Este pago se efectuará según prefiera el ganador: mediante transferencia vía PIX, o si lo prefiere, se le hará entrega en Cuba en CUP a su familiar según el tipo de cambio vigente en el grupo de Remesas del administrador. (Para conocer esta información y tasa de cambio, es obligatorio unirse al grupo de WhatsApp del administrador: https://chat.whatsapp.com/HEaEIKaEjksJRrWEKcIVEo?s=sh&p=a&ilr=0).\n"
            f"6️⃣ *Transparencia:* El ganador se define utilizando los resultados oficiales de la *Lotería de Florida* (Pick 3) en el horario nocturno.\n\n"
            f"🤝 *¡Ayúdanos a crecer!* Puedes invitar a otros usuarios a unirse al grupo mediante este enlace: https://t.me/+didZDftOZAhmZjdh para que participen en el sorteo. Entre más entren y jueguen, más rápido se dará el resultado y obtendrán su premio.\n\n"
            f"¡Mucha suerte y gracias por formar parte de *Gran Sorteo 100*! 🍀✨"
