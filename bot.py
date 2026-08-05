@@ -71,18 +71,22 @@ def guardar_data_completa(data):
     except Exception as e:
         print(f"Error al guardar JSON: {e}")
 
-def calcular_precio_total(cantidad):
+def calcular_precio_total(cantidad, usuario_ya_tiene_compras=False):
     if cantidad <= 0:
         return 0
     
+    # Si el usuario ya hizo una jugada previa, TODO se cobra a 20 reales cada uno (incluso si manda 2, 3 o 4)
+    if usuario_ya_tiene_compras:
+        return cantidad * 20
+
+    # Si es su primera jugada, aplica la tabla promocional exacta
     total = 0
     restantes = cantidad
 
-    # Bloques de 5 (80 reales)
-    while restantes >= 5:
+    if restantes >= 5:
         total += 80
         restantes -= 5
-
+    
     if restantes == 4:
         total += 70
         restantes = 0
@@ -92,12 +96,20 @@ def calcular_precio_total(cantidad):
     elif restantes == 2:
         total += 30
         restantes = 0
-
-    if restantes == 1:
+    elif restantes == 1:
         total += 20
         restantes = 0
 
+    if restantes > 0:
+        total += restantes * 20
+
     return total
+
+def usuario_tiene_jugada_previa(user_id, rifa):
+    for num_str, info in rifa.items():
+        if info.get("estado") == "ocupado" and info.get("user_id") == user_id:
+            return True
+    return False
 
 def generar_texto_lista():
     data = obtener_data_completa()
@@ -133,13 +145,14 @@ def generar_texto_lista():
 TEXTO_REGLAS_OFICIAL = (
     "📌 *REGLAS Y DINÁMICA DEL GRUPO (Gran Sorteo 100):*\n\n"
     "1️⃣ *Respeto:* Mantén un ambiente de respeto absoluto hacia todos los miembros de la comunidad y administradores.\n"
-    "2️⃣ *Números y Costo:* Disponemos de una tabla con *100 números* (del 01 al 100). Precios:\n"
+    "2️⃣ *Números y Promoción:* Disponemos de 100 números (del 01 al 100). Precios para tu *primera jugada*:\n"
     "• 1 número = *20 reales*\n"
     "• 2 números = *30 reales*\n"
     "• 3 números = *50 reales*\n"
     "• 4 números = *70 reales*\n"
     "• 5 números = *80 reales*\n"
-    "(A partir del 6to número en adelante se cobran a 20 reales adicionales cada uno). Envía la palabra `lista` para ver los disponibles y escribe los que deseas separados por coma (ej: *7, 14*) aquí o en el grupo.\n"
+    "⚠️ *¡Atención!* La promoción de paquetes aplica **únicamente para la primera jugada** de cada usuario. A partir de tu segunda jugada, **cada número tiene un costo estándar de 20 reales**, sin importar si pides 2, 3 o 4 números.\n"
+    "Envía la palabra `lista` para ver los disponibles y escribe los que deseas separados por coma (ej: *7, 14*) aquí o en el grupo.\n"
     "3️⃣ *Condición del Sorteo:* El sorteo se realizará **únicamente cuando los 100 números estén 100% ocupados y pagados**.\n"
     "4️⃣ *Garantía de Devolución:* Si algún participante adquiere sus números pero **no desea esperar**, puede solicitar la **devolución íntegra de su dinero** con el administrador (@yordanisr).\n"
     "5️⃣ *Entrega del Premio:* El usuario ganador recibirá un premio de *1000 reales* (vía PIX o en Cuba en CUP a su familiar mediante la tasa del grupo de remesas). Grupo de WhatsApp obligatorio para tasa: https://chat.whatsapp.com/HEaEIKaEjksJRrWEKcIVEo?s=sh&p=a&ilr=0.\n"
@@ -330,9 +343,6 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 invalidos.append(p)
 
-        if (ocupados or pendientes or invalidos) and not valid_para_reservar if 'valid_para_reservar' in locals() else validos_para_reservar:
-            pass
-
         if validos_para_reservar:
             req_id = "r" + str(uuid.uuid4().int)[:4]
             for n in validos_para_reservar:
@@ -352,11 +362,20 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             nums_solicitados_txt = ", ".join([n.zfill(2) for n in validos_para_reservar])
             cantidad_numeros = len(validos_para_reservar)
-            total_a_pagar = calcular_precio_total(cantidad_numeros)
+            
+            # Verificamos si el usuario ya tiene compras previas
+            ya_tiene_compras = usuario_tiene_jugada_previa(user_id, rifa)
+            total_a_pagar = calcular_precio_total(cantidad_numeros, usuario_ya_tiene_compras=ya_tiene_compras)
+
+            if ya_tiene_compras:
+                aviso_promocion = f"\n⚠️ *Aviso importante:* Como ya tienes una jugada confirmada previa, esta nueva jugada de {cantidad_numeros} número(s) **no aplica para la promoción** y se cobra a precio estándar (*20 reales cada uno*).\n"
+            else:
+                aviso_promocion = f"\n✨ *¡Primera jugada detectada!* Aplica la tarifa promocional para tus {cantidad_numeros} número(s).\n"
 
             await update.message.reply_text(
                 f"⏳ *SOLICITUD EN PROCESO* ⏳\n\n"
-                f"Hola {nombre_usuario}, tus números (*{nums_solicitados_txt}*) están reservados temporalmente.\n\n"
+                f"Hola {nombre_usuario}, tus números (*{nums_solicitados_txt}*) están reservados temporalmente.\n"
+                f"{aviso_promocion}"
                 f"💰 Cantidad: *{cantidad_numeros}*\n"
                 f"💵 Total a transferir: *{total_a_pagar} reales*\n\n"
                 f"Contacta al administrador @yordanisr para pagar.",
@@ -370,7 +389,7 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             txt_admin = (
                 f"📥 *NUEVA SOLICITUD* (ID: `{req_id}`)\n\n"
-                f"👤 *Cliente:* {nombre_usuario}\n"
+                f"👤 *Cliente:* {nombre_usuario} {'*(Jugada Posterior - Precio Normal)*' if ya_tiene_compras else '*(1era Jugada - Promoción)*'}\n"
                 f"🎟️ *Números:* *{nums_solicitados_txt}*\n"
                 f"💵 *Total:* *{total_a_pagar} reales* ({cantidad_numeros} núm.)"
             )
