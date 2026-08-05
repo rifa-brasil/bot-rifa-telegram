@@ -167,11 +167,12 @@ TEXTO_REGLAS_OFICIAL = (
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     nombre = user.first_name or "Participante"
+    mencion = f"[{nombre}](tg://user?id={user.id})"
     data_rifa = obtener_data_completa()
     estado_actual_rifa = data_rifa.get("estado_rifa", "activa")
 
     respuesta = (
-        f"¡Hola {nombre}! Estado actual de Gran Sorteo 100. ✨\n\n"
+        f"¡Hola {mencion}! Estado actual de Gran Sorteo 100. ✨\n\n"
         f"{generar_texto_lista()}"
     )
     if estado_actual_rifa == "activa":
@@ -281,19 +282,21 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ganador_nombre = info_num.get("nombre")
     ganador_id = info_num.get("user_id")
     num_formateado = num_str.zfill(2)
+    
+    # Mención con enlace de perfil para el ganador
     ganador_mencion = f"[{ganador_nombre}](tg://user?id={ganador_id})" if ganador_id else ganador_nombre
 
     data_rifa["estado_rifa"] = "finalizada"
     guardar_data_completa(data_rifa)
 
-    # 1. Enviar primero el mensaje del resultado de la Lotería de Florida
+    # 1. Mensaje del resultado de la Lotería
     await update.message.reply_text(
         f"🎯 *¡RESULTADO OFICIAL DE LA LOTERÍA!* 🎯\n\n"
         f"El número ganador de la Florida Pick 3 es el: *{num_formateado}*",
         parse_mode="Markdown"
     )
 
-    # 2. Enviar después el mensaje del ganador con el formato exacto de la captura
+    # 2. Mensaje del ganador
     await update.message.reply_text(
         f"🎉 *¡Felicidades al Ganador!* 🎉\n\n"
         f"El usuario {ganador_mencion} ha ganado con el número {num_formateado} un premio de 1000 reales. ¡Muchas felicidades! 🥳\n\n"
@@ -322,6 +325,9 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     nombre_usuario = user.first_name or "Usuario"
+    
+    # Mención con enlace al chat privado del usuario
+    usuario_mencion = f"[{nombre_usuario}](tg://user?id={user_id})"
     chat_id = update.effective_chat.id
 
     data_rifa = obtener_data_completa()
@@ -331,7 +337,7 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if comando in ["hola", "buenas", "lista", "inicio", "rifa", "sorteo"]:
         await update.message.reply_text(
-            f"¡Hola {nombre_usuario}! Estado actual de Gran Sorteo 100:\n\n{generar_texto_lista()}",
+            f"¡Hola {usuario_mencion}! Estado actual de Gran Sorteo 100:\n\n{generar_texto_lista()}",
             parse_mode="Markdown"
         )
         return
@@ -389,9 +395,10 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 aviso_promocion = f"\n✨ *¡Primera jugada detectada!* Aplica la tarifa promocional para tus {cantidad_numeros} número(s).\n"
 
+            # Mensaje de Solicitud en Proceso con el nombre del usuario enlazado
             await update.message.reply_text(
                 f"⏳ *SOLICITUD EN PROCESO* ⏳\n\n"
-                f"Hola {nombre_usuario}, tus números (*{nums_solicitados_txt}*) están reservados temporalmente.\n"
+                f"Hola {usuario_mencion}, tus números (*{nums_solicitados_txt}*) están reservados temporalmente.\n"
                 f"{aviso_promocion}"
                 f"💰 Cantidad: *{cantidad_numeros}*\n"
                 f"💵 Total a transferir: *{total_a_pagar} reales*\n\n"
@@ -404,9 +411,10 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("🔴 Rechazar Pago", callback_data=f"rech_{req_id}")
             ]]
             
+            # Notificación al administrador con enlace directo al usuario
             txt_admin = (
                 f"📥 *NUEVA SOLICITUD* (ID: `{req_id}`)\n\n"
-                f"👤 *Cliente:* {nombre_usuario} {'*(Jugada Posterior - Precio Normal)*' if ya_tiene_compras else '*(1era Jugada - Promoción)*'}\n"
+                f"👤 *Cliente:* {usuario_mencion} {'*(Jugada Posterior - Precio Normal)*' if ya_tiene_compras else '*(1era Jugada - Promoción)*'}\n"
                 f"🎟️ *Números:* *{nums_solicitados_txt}*\n"
                 f"💵 *Total:* *{total_a_pagar} reales* ({cantidad_numeros} núm.)"
             )
@@ -446,6 +454,9 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_origen = sol["chat_origen"]
     nums_formatted = ", ".join([n.zfill(2) for n in user_nums])
 
+    # Mención al usuario que compró
+    user_mencion = f"[{user_nombre}](tg://user?id={user_id})"
+
     if accion == "conf":
         for n in user_nums:
             rifa[n]["estado"] = "ocupado"
@@ -462,10 +473,10 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         guardar_data_completa(data_rifa)
         await query.edit_message_text(f"✅ *Aprobado.* Números: {nums_formatted}", parse_mode="Markdown")
 
-        # Formato de pago confirmado idéntico a la captura
+        # Formato de Pago Confirmado con el enlace al perfil en el campo Usuario
         texto_pago_confirmado = (
             f"🎉 *¡PAGO CONFIRMADO!* 🎉\n\n"
-            f"👤 *Usuario:* {user_nombre}\n"
+            f"👤 *Usuario:* {user_mencion}\n"
             f"🎟️ *Números asignados:* {nums_formatted}\n\n"
             f"¡Muchas felicidades! 🤝"
         )
