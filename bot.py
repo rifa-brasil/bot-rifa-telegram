@@ -72,14 +72,30 @@ def guardar_data_completa(data):
        print(f"Error al guardar JSON: {e}")
 
 def calcular_precio_total(cantidad):
-   # Promoción: 1 por 20, 3 por 50, 5 por 80.
-   paquetes_de_5 = cantidad // 5
-   resto_despues_de_5 = cantidad % 5
+   # Lógica exacta:
+   # - 1 número = 20
+   # - 3 números = 50
+   # - 5 números = 80 (Tope de promoción)
+   # - A partir del 6to número en adelante, cada uno extra suma 20 reales normales.
    
-   paquetes_de_3 = resto_despues_de_5 // 3
-   sueltos = resto_despues_de_5 % 3
+   if cantidad <= 0:
+       return 0
    
-   total = (paquetes_de_5 * 80) + (paquetes_de_3 * 50) + (sueltos * 20)
+   total = 0
+   restantes = cantidad
+
+   # Si compra 5 o más, aplicamos bloques de promoción de 5 (80 reales)
+   while restantes >= 5:
+       total += 80
+       restantes -= 5
+
+   # Si quedan 3 o 4 (y ya pasamos bloques de 5)
+   if restantes >= 3:
+       total += 50
+       restantes -= 3
+
+   # Los que queden sueltos (1 o 2) se cobran a 20 cada uno
+   total += restantes * 20
    return total
 
 def generar_texto_lista():
@@ -116,7 +132,7 @@ def generar_texto_lista():
 TEXTO_REGLAS_OFICIAL = (
    "📌 *REGLAS Y DINÁMICA DEL GRUPO (Gran Sorteo 100):*\n\n"
    "1️⃣ *Respeto:* Mantén un ambiente de respeto absoluto hacia todos los miembros de la comunidad y administradores.\n"
-   "2️⃣ *Números y Costo:* Disponemos de una tabla con *100 números* (del 01 al 100). Precios: *1 número por 20 reales*, *3 números por 50 reales* y *5 números por 80 reales*. Envía la palabra `lista` para ver los disponibles y escribe los que deseas separados por coma (ej: *7, 14*) aquí o en el grupo.\n"
+   "2️⃣ *Números y Costo:* Disponemos de una tabla con *100 números* (del 01 al 100). Precios: *1 número por 20 reales*, *3 números por 50 reales* y *5 números por 80 reales* (a partir del 6to número en adelante se cobran a 20 reales adicionales cada uno). Envía la palabra `lista` para ver los disponibles y escribe los que deseas separados por coma (ej: *7, 14*) aquí o en el grupo.\n"
    "3️⃣ *Condición del Sorteo:* El sorteo se realizará **únicamente cuando los 100 números estén 100% ocupados y pagados**. Esto puede demorar varios días dependiendo de la rapidez en que los usuarios escojan y ocupen los números.\n"
    "4️⃣ *Garantía de Devolución:* Si algún participante adquiere sus números pero **no desea esperar**, puede ponerse en contacto con el administrador (@yordanisr) en cualquier momento para solicitar la **devolución íntegra de su dinero**.\n"
    "5️⃣ *Entrega del Premio:* El usuario ganador recibirá un premio de *1000 reales*. Este pago se efectuará según prefiera el ganador: mediante transferencia vía PIX, o si lo prefiere, se le hará entrega en Cuba en CUP a su familiar según el tipo de cambio vigente en el grupo de Remesas del administrador. (Para conocer esta información y tasa de cambio, es obligatorio unirse al grupo de WhatsApp del administrador: https://chat.whatsapp.com/HEaEIKaEjksJRrWEKcIVEo?s=sh&p=a&ilr=0).\n"
