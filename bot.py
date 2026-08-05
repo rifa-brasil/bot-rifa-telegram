@@ -79,27 +79,26 @@ def calcular_precio_total(cantidad, usuario_ya_tiene_compras=False):
     if usuario_ya_tiene_compras:
         return cantidad * 20
 
-    # Si es su primera jugada, aplica la tabla promocional exacta
+    # Si es su primera jugada:
     total = 0
     restantes = cantidad
 
+    # Si pide 5 o más, los primeros 5 cuestan 80 en total
     if restantes >= 5:
         total += 80
         restantes -= 5
-    
-    if restantes == 4:
-        total += 70
-        restantes = 0
-    elif restantes == 3:
-        total += 50
-        restantes = 0
-    elif restantes == 2:
-        total += 30
-        restantes = 0
-    elif restantes == 1:
-        total += 20
-        restantes = 0
+    else:
+        # Si pide menos de 5, aplica la tabla promocional exacta
+        if restantes == 4:
+            return 70
+        elif restantes == 3:
+            return 50
+        elif restantes == 2:
+            return 30
+        elif restantes == 1:
+            return 20
 
+    # A partir del 6to número en adelante, cada uno vale estrictamente 20 reales
     if restantes > 0:
         total += restantes * 20
 
@@ -356,7 +355,6 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 invalidos.append(p)
 
         if validos_para_reservar:
-            # Verificamos si el usuario ya tiene jugadas previas ANTES de registrar esta nueva solicitud
             ya_tiene_compras = usuario_tiene_jugada_previa(user_id, data_rifa)
 
             req_id = "r" + str(uuid.uuid4().int)[:4]
