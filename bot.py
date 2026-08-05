@@ -75,20 +75,16 @@ def calcular_precio_total(cantidad, usuario_ya_tiene_compras=False):
     if cantidad <= 0:
         return 0
     
-    # Si el usuario ya hizo una jugada previa, TODO se cobra a 20 reales cada uno
     if usuario_ya_tiene_compras:
         return cantidad * 20
 
-    # Si es su primera jugada:
     total = 0
     restantes = cantidad
 
-    # Si pide 5 o más, los primeros 5 cuestan 80 en total
     if restantes >= 5:
         total += 80
         restantes -= 5
     else:
-        # Si pide menos de 5, aplica la tabla promocional exacta
         if restantes == 4:
             return 70
         elif restantes == 3:
@@ -98,7 +94,6 @@ def calcular_precio_total(cantidad, usuario_ya_tiene_compras=False):
         elif restantes == 1:
             return 20
 
-    # A partir del 6to número en adelante, cada uno vale estrictamente 20 reales
     if restantes > 0:
         total += restantes * 20
 
@@ -108,12 +103,10 @@ def usuario_tiene_jugada_previa(user_id, data_completa):
     rifa = data_completa.get("numeros", {})
     solicitudes = data_completa.get("solicitudes_pendientes", {})
     
-    # 1. Revisar si tiene números ya ocupados o pendientes en la rifa
     for num_str, info in rifa.items():
         if info.get("user_id") == user_id and info.get("estado") in ["ocupado", "pendiente"]:
             return True
             
-    # 2. Revisar si tiene solicitudes activas en trámite
     for req_id, sol in solicitudes.items():
         if sol.get("user_id") == user_id:
             return True
@@ -293,7 +286,20 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data_rifa["estado_rifa"] = "finalizada"
     guardar_data_completa(data_rifa)
 
-    await update.message.reply_text(f"🎯 *¡GANADOR OFICIAL!* El número es el: *{num_formateado}*\n\n¡Felicidades a {ganador_mencion}!", parse_mode="Markdown")
+    # 1. Enviar primero el mensaje del resultado de la Lotería de Florida
+    await update.message.reply_text(
+        f"🎯 *¡RESULTADO OFICIAL DE LA LOTERÍA!* 🎯\n\n"
+        f"El número ganador de la Florida Pick 3 es el: *{num_formateado}*",
+        parse_mode="Markdown"
+    )
+
+    # 2. Enviar después el mensaje del ganador con el formato exacto de la captura
+    await update.message.reply_text(
+        f"🎉 *¡Felicidades al Ganador!* 🎉\n\n"
+        f"El usuario {ganador_mencion} ha ganado con el número {num_formateado} un premio de 1000 reales. ¡Muchas felicidades! 🥳\n\n"
+        f"Por favor, póngase en contacto con el administrador @yordanisr para recibir su premio (puede elegir que se le transfiera vía PIX o que se le envíe a su familiar en Cuba). Una vez que reciba la transferencia, le pedimos por favor que haga una captura de pantalla y la envíe a este grupo como evidencia de que recibió su pago y que todo funciona con total transparencia.",
+        parse_mode="Markdown"
+    )
 
 async def bienvenida_nuevos_usuarios(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for nuevo_usuario in update.message.new_chat_members:
@@ -456,9 +462,17 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         guardar_data_completa(data_rifa)
         await query.edit_message_text(f"✅ *Aprobado.* Números: {nums_formatted}", parse_mode="Markdown")
 
+        # Formato de pago confirmado idéntico a la captura
+        texto_pago_confirmado = (
+            f"🎉 *¡PAGO CONFIRMADO!* 🎉\n\n"
+            f"👤 *Usuario:* {user_nombre}\n"
+            f"🎟️ *Números asignados:* {nums_formatted}\n\n"
+            f"¡Muchas felicidades! 🤝"
+        )
+
         try:
-            await context.bot.send_message(chat_id=chat_origen, text=f"🎉 *¡PAGO CONFIRMADO!* 🎉\n👤 {user_nombre} - Números: *{nums_formatted}*", parse_mode="Markdown")
-            await context.bot.send_message(chat_id=user_id, text=f"✅ ¡Tu pago fue aprobado! Tus números (*{nums_formatted}*) ya son tuyos. 🍀", parse_mode="Markdown")
+            await context.bot.send_message(chat_id=chat_origen, text=texto_pago_confirmado, parse_mode="Markdown")
+            await context.bot.send_message(chat_id=user_id, text=texto_pago_confirmado, parse_mode="Markdown")
         except Exception as e:
             print(f"Error notificando aprobación: {e}")
 
@@ -480,7 +494,6 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main():
     inicializar_rifa()
     
-    # Iniciar servidor web en segundo plano
     await start_web_server()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -498,12 +511,10 @@ async def main():
 
     print("🤖 Bot de Gran Sorteo 100 iniciado correctamente...")
     
-    # Inicializar y arrancar polling de manera segura
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
 
-    # Mantener el proceso vivo indefinidamente
     stop_signal = asyncio.Event()
     await stop_signal.wait()
 
