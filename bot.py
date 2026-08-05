@@ -75,7 +75,7 @@ def calcular_precio_total(cantidad, usuario_ya_tiene_compras=False):
     if cantidad <= 0:
         return 0
     
-    # Si el usuario ya hizo una jugada previa, TODO se cobra a 20 reales cada uno (incluso si manda 2, 3 o 4)
+    # Si el usuario ya hizo una jugada previa, TODO se cobra a 20 reales cada uno
     if usuario_ya_tiene_compras:
         return cantidad * 20
 
@@ -105,10 +105,20 @@ def calcular_precio_total(cantidad, usuario_ya_tiene_compras=False):
 
     return total
 
-def usuario_tiene_jugada_previa(user_id, rifa):
+def usuario_tiene_jugada_previa(user_id, data_completa):
+    rifa = data_completa.get("numeros", {})
+    solicitudes = data_completa.get("solicitudes_pendientes", {})
+    
+    # 1. Revisar si tiene números ya ocupados o pendientes en la rifa
     for num_str, info in rifa.items():
-        if info.get("estado") == "ocupado" and info.get("user_id") == user_id:
+        if info.get("user_id") == user_id and info.get("estado") in ["ocupado", "pendiente"]:
             return True
+            
+    # 2. Revisar si tiene solicitudes activas en trámite
+    for req_id, sol in solicitudes.items():
+        if sol.get("user_id") == user_id:
+            return True
+            
     return False
 
 def generar_texto_lista():
@@ -145,13 +155,15 @@ def generar_texto_lista():
 TEXTO_REGLAS_OFICIAL = (
     "📌 *REGLAS Y DINÁMICA DEL GRUPO (Gran Sorteo 100):*\n\n"
     "1️⃣ *Respeto:* Mantén un ambiente de respeto absoluto hacia todos los miembros de la comunidad y administradores.\n"
-    "2️⃣ *Números y Promoción:* Disponemos de 100 números (del 01 al 100). Precios para tu *primera jugada*:\n"
+    "2️⃣ *Números y Promoción:* Disponemos de 100 números (del 01 al 100).\n"
+    "✨ *Valores para tu primera jugada (Promoción):*\n"
     "• 1 número = *20 reales*\n"
     "• 2 números = *30 reales*\n"
     "• 3 números = *50 reales*\n"
     "• 4 números = *70 reales*\n"
     "• 5 números = *80 reales*\n"
-    "⚠️ *¡Atención!* La promoción de paquetes aplica **únicamente para la primera jugada** de cada usuario. A partir de tu segunda jugada, **cada número tiene un costo estándar de 20 reales**, sin importar si pides 2, 3 o 4 números.\n"
+    "*(Si pides más de 5 números en tu primera jugada, los primeros 5 valen 80 y a partir del 6to número cada uno cuesta exactamente 20 reales).* \n\n"
+    "⚠️ *¡Atención a las jugadas adicionales!* La promoción de paquetes aplica **únicamente para la primera jugada** de cada usuario. A partir de tu segunda jugada (incluso si mandas 2, 3, 4 o más números), **cada número tiene un costo fijo de 20 reales**, ya que no entra en la promoción.\n\n"
     "Envía la palabra `lista` para ver los disponibles y escribe los que deseas separados por coma (ej: *7, 14*) aquí o en el grupo.\n"
     "3️⃣ *Condición del Sorteo:* El sorteo se realizará **únicamente cuando los 100 números estén 100% ocupados y pagados**.\n"
     "4️⃣ *Garantía de Devolución:* Si algún participante adquiere sus números pero **no desea esperar**, puede solicitar la **devolución íntegra de su dinero** con el administrador (@yordanisr).\n"
@@ -344,6 +356,9 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 invalidos.append(p)
 
         if validos_para_reservar:
+            # Verificamos si el usuario ya tiene jugadas previas ANTES de registrar esta nueva solicitud
+            ya_tiene_compras = usuario_tiene_jugada_previa(user_id, data_rifa)
+
             req_id = "r" + str(uuid.uuid4().int)[:4]
             for n in validos_para_reservar:
                 rifa[n]["estado"] = "pendiente"
@@ -363,12 +378,10 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             nums_solicitados_txt = ", ".join([n.zfill(2) for n in validos_para_reservar])
             cantidad_numeros = len(validos_para_reservar)
             
-            # Verificamos si el usuario ya tiene compras previas
-            ya_tiene_compras = usuario_tiene_jugada_previa(user_id, rifa)
             total_a_pagar = calcular_precio_total(cantidad_numeros, usuario_ya_tiene_compras=ya_tiene_compras)
 
             if ya_tiene_compras:
-                aviso_promocion = f"\n⚠️ *Aviso importante:* Como ya tienes una jugada confirmada previa, esta nueva jugada de {cantidad_numeros} número(s) **no aplica para la promoción** y se cobra a precio estándar (*20 reales cada uno*).\n"
+                aviso_promocion = f"\n⚠️ *Aviso importante:* Como ya tienes una jugada previa registrada, esta nueva jugada de {cantidad_numeros} número(s) **no aplica para la promoción** y se cobra a precio estándar (*20 reales cada número*).\n"
             else:
                 aviso_promocion = f"\n✨ *¡Primera jugada detectada!* Aplica la tarifa promocional para tus {cantidad_numeros} número(s).\n"
 
