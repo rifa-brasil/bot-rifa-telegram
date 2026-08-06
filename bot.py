@@ -76,26 +76,26 @@ def calcular_precio_total(cantidad, usuario_ya_tiene_compras=False):
         return 0
     
     if usuario_ya_tiene_compras:
-        return cantidad * 20
+        return cantidad * 10
 
     total = 0
     restantes = cantidad
 
     if restantes >= 5:
-        total += 80
+        total += 40
         restantes -= 5
     else:
         if restantes == 4:
-            return 70
+            return 35
         elif restantes == 3:
-            return 50
+            return 25
         elif restantes == 2:
-            return 30
+            return 15
         elif restantes == 1:
-            return 20
+            return 10
 
     if restantes > 0:
-        total += restantes * 20
+        total += restantes * 10
 
     return total
 
@@ -149,13 +149,13 @@ TEXTO_REGLAS_OFICIAL = (
     "1️⃣ *Respeto:* Mantén un ambiente de respeto absoluto hacia todos los miembros de la comunidad y administradores.\n"
     "2️⃣ *Números y Promoción:* Disponemos de 100 números (del 01 al 100).\n"
     "✨ *Valores para tu primera jugada (Promoción):*\n"
-    "• 1 número = *20 reales*\n"
-    "• 2 números = *30 reales*\n"
-    "• 3 números = *50 reales*\n"
-    "• 4 números = *70 reales*\n"
-    "• 5 números = *80 reales*\n"
-    "*(Si pides más de 5 números en tu primera jugada, los primeros 5 valen 80 y a partir del 6to número cada uno cuesta exactamente 20 reales).* \n\n"
-    "⚠️ *¡Atención a las jugadas adicionales!* La promoción de paquetes aplica **únicamente para la primera jugada** de cada usuario. A partir de tu segunda jugada (incluso si mandas 2, 3, 4 o más números), **cada número tiene un costo fijo de 20 reales**, ya que no entra en la promoción.\n\n"
+    "• 1 número = *10 reales*\n"
+    "• 2 números = *15 reales*\n"
+    "• 3 números = *25 reales*\n"
+    "• 4 números = *35 reales*\n"
+    "• 5 números = *40 reales*\n"
+    "*(Si pides más de 5 números en tu primera jugada, los primeros 5 valen 40 y a partir del 6to número cada uno cuesta exactamente 10 reales).* \n\n"
+    "⚠️ *¡Atención a las jugadas adicionales!* La promoción de paquetes aplica **únicamente para la primera jugada** de cada usuario. A partir de tu segunda jugada (incluso si mandas 2, 3, 4 o más números), **cada número tiene un costo fijo de 10 reales**, ya que no entra en la promoción.\n\n"
     "Envía la palabra `lista` para ver los disponibles y escribe los que deseas separados por coma (ej: *7, 14*) aquí o en el grupo.\n"
     "3️⃣ *Condición del Sorteo:* El sorteo se realizará **únicamente cuando los 100 números estén 100% ocupados y pagados**.\n"
     "4️⃣ *Garantía de Devolución:* Si algún participante adquiere sus números pero **no desea esperar**, puede solicitar la **devolución íntegra de su dinero** con el administrador (@yordanisr).\n"
@@ -283,20 +283,17 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ganador_id = info_num.get("user_id")
     num_formateado = num_str.zfill(2)
     
-    # Mención con enlace de perfil para el ganador
     ganador_mencion = f"[{ganador_nombre}](tg://user?id={ganador_id})" if ganador_id else ganador_nombre
 
     data_rifa["estado_rifa"] = "finalizada"
     guardar_data_completa(data_rifa)
 
-    # 1. Mensaje del resultado de la Lotería
     await update.message.reply_text(
         f"🎯 *¡RESULTADO OFICIAL DE LA LOTERÍA!* 🎯\n\n"
         f"El número ganador de la Florida Pick 3 es el: *{num_formateado}*",
         parse_mode="Markdown"
     )
 
-    # 2. Mensaje del ganador
     await update.message.reply_text(
         f"🎉 *¡Felicidades al Ganador!* 🎉\n\n"
         f"El usuario {ganador_mencion} ha ganado con el número {num_formateado} un premio de 1000 reales. ¡Muchas felicidades! 🥳\n\n"
@@ -326,7 +323,6 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     nombre_usuario = user.first_name or "Usuario"
     
-    # Mención con enlace al chat privado del usuario
     usuario_mencion = f"[{nombre_usuario}](tg://user?id={user_id})"
     chat_id = update.effective_chat.id
 
@@ -391,11 +387,10 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total_a_pagar = calcular_precio_total(cantidad_numeros, usuario_ya_tiene_compras=ya_tiene_compras)
 
             if ya_tiene_compras:
-                aviso_promocion = f"\n⚠️ *Aviso importante:* Como ya tienes una jugada previa registrada, esta nueva jugada de {cantidad_numeros} número(s) **no aplica para la promoción** y se cobra a precio estándar (*20 reales cada número*).\n"
+                aviso_promocion = f"\n⚠️ *Aviso importante:* Como ya tienes una jugada previa registrada, esta nueva jugada de {cantidad_numeros} número(s) **no aplica para la promoción** y se cobra a precio estándar (*10 reales cada número*).\n"
             else:
                 aviso_promocion = f"\n✨ *¡Primera jugada detectada!* Aplica la tarifa promocional para tus {cantidad_numeros} número(s).\n"
 
-            # Mensaje de Solicitud en Proceso con el nombre del usuario enlazado
             await update.message.reply_text(
                 f"⏳ *SOLICITUD EN PROCESO* ⏳\n\n"
                 f"Hola {usuario_mencion}, tus números (*{nums_solicitados_txt}*) están reservados temporalmente.\n"
@@ -411,7 +406,6 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("🔴 Rechazar Pago", callback_data=f"rech_{req_id}")
             ]]
             
-            # Notificación al administrador con enlace directo al usuario
             txt_admin = (
                 f"📥 *NUEVA SOLICITUD* (ID: `{req_id}`)\n\n"
                 f"👤 *Cliente:* {usuario_mencion} {'*(Jugada Posterior - Precio Normal)*' if ya_tiene_compras else '*(1era Jugada - Promoción)*'}\n"
@@ -454,7 +448,6 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_origen = sol["chat_origen"]
     nums_formatted = ", ".join([n.zfill(2) for n in user_nums])
 
-    # Mención al usuario que compró
     user_mencion = f"[{user_nombre}](tg://user?id={user_id})"
 
     if accion == "conf":
@@ -473,7 +466,6 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         guardar_data_completa(data_rifa)
         await query.edit_message_text(f"✅ *Aprobado.* Números: {nums_formatted}", parse_mode="Markdown")
 
-        # Formato de Pago Confirmado con el enlace al perfil en el campo Usuario
         texto_pago_confirmado = (
             f"🎉 *¡PAGO CONFIRMADO!* 🎉\n\n"
             f"👤 *Usuario:* {user_mencion}\n"
