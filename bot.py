@@ -71,31 +71,50 @@ def guardar_data_completa(data):
     except Exception as e:
         print(f"Error al guardar JSON: {e}")
 
+# --- VALOR DE CADA NÚMERO Y CÁLCULO AUTOMÁTICO DEL PREMIO (55%) ---
+VALOR_POR_NUMERO = 10
+
+def calcular_premio_total():
+    recaudacion_total = 100 * VALOR_POR_NUMERO
+    premio = recaudacion_total * 0.55
+    # Si el resultado es entero, lo mostramos sin decimales molestos
+    if premio.is_integer():
+        return int(premio)
+    return round(premio, 2)
+# -----------------------------------------------------------------
+
 def calcular_precio_total(cantidad, usuario_ya_tiene_compras=False):
     if cantidad <= 0:
         return 0
     
     if usuario_ya_tiene_compras:
-        return cantidad * 10
+        return cantidad * VALOR_POR_NUMERO
 
     total = 0
     restantes = cantidad
 
+    # Paquete de 5 números con descuento promocional proporcional
+    p5 = int(VALOR_POR_NUMERO * 4)
+    p4 = int(VALOR_POR_NUMERO * 3.5)
+    p3 = int(VALOR_POR_NUMERO * 2.5)
+    p2 = int(VALOR_POR_NUMERO * 1.5)
+    p1 = VALOR_POR_NUMERO
+
     if restantes >= 5:
-        total += 40
+        total += p5
         restantes -= 5
     else:
         if restantes == 4:
-            return 35
+            return p4
         elif restantes == 3:
-            return 25
+            return p3
         elif restantes == 2:
-            return 15
+            return p2
         elif restantes == 1:
-            return 10
+            return p1
 
     if restantes > 0:
-        total += restantes * 10
+        total += restantes * VALOR_POR_NUMERO
 
     return total
 
@@ -144,25 +163,27 @@ def generar_texto_lista():
         texto += "\n\n⛔ *ESTADO:* Rifa temporalmente bloqueada por el administrador."
     return texto
 
-TEXTO_REGLAS_OFICIAL = (
-    "📌 *REGLAS Y DINÁMICA DEL GRUPO (Gran Sorteo 100):*\n\n"
-    "1️⃣ *Respeto:* Mantén un ambiente de respeto absoluto hacia todos los miembros de la comunidad y administradores.\n"
-    "2️⃣ *Números y Promoción:* Disponemos de 100 números (del 01 al 100).\n"
-    "✨ *Valores para tu primera jugada (Promoción):*\n"
-    "• 1 número = *10 reales*\n"
-    "• 2 números = *15 reales*\n"
-    "• 3 números = *25 reales*\n"
-    "• 4 números = *35 reales*\n"
-    "• 5 números = *40 reales*\n"
-    "*(Si pides más de 5 números en tu primera jugada, los primeros 5 valen 40 y a partir del 6to número cada uno cuesta exactamente 10 reales).* \n\n"
-    "⚠️ *¡Atención a las jugadas adicionales!* La promoción de paquetes aplica **únicamente para la primera jugada** de cada usuario. A partir de tu segunda jugada (incluso si mandas 2, 3, 4 o más números), **cada número tiene un costo fijo de 10 reales**, ya que no entra en la promoción.\n\n"
-    "Envía la palabra `lista` para ver los disponibles y escribe los que deseas separados por coma (ej: *7, 14*) aquí o en el grupo.\n"
-    "3️⃣ *Condición del Sorteo:* El sorteo se realizará **únicamente cuando los 100 números estén 100% ocupados y pagados**.\n"
-    "4️⃣ *Garantía de Devolución:* Si algún participante adquiere sus números pero **no desea esperar**, puede solicitar la **devolución íntegra de su dinero** con el administrador (@yordanisr).\n"
-    "5️⃣ *Entrega del Premio:* El usuario ganador recibirá un premio de *1000 reales* (vía PIX o en Cuba en CUP a su familiar mediante la tasa del grupo de remesas). Grupo de WhatsApp obligatorio para tasa: https://chat.whatsapp.com/HEaEIKaEjksJRrWEKcIVEo?s=sh&p=a&ilr=0.\n"
-    "6️⃣ *Transparencia:* El ganador se define utilizando los resultados oficiales de la *Lotería de Florida* (Pick 3) en el horario nocturno.\n\n"
-    "🤝 *¡Ayúdanos a crecer!* Enlace de invitación al grupo: https://t.me/+didZDftOZAhmZjdh"
-)
+def obtener_texto_reglas():
+    premio_actual = calcular_premio_total()
+    return (
+        "📌 *REGLAS Y DINÁMICA DEL GRUPO (Gran Sorteo 100):*\n\n"
+        "1️⃣ *Respeto:* Mantén un ambiente de respeto absoluto hacia todos los miembros de la comunidad y administradores.\n"
+        "2️⃣ *Números y Promoción:* Disponemos de 100 números (del 01 al 100).\n"
+        f"✨ *Valores para tu primera jugada (Promoción):*\n"
+        f"• 1 número = *{VALOR_POR_NUMERO} reales*\n"
+        f"• 2 números = *{int(VALOR_POR_NUMERO * 1.5)} reales*\n"
+        f"• 3 números = *{int(VALOR_POR_NUMERO * 2.5)} reales*\n"
+        f"• 4 números = *{int(VALOR_POR_NUMERO * 3.5)} reales*\n"
+        f"• 5 números = *{int(VALOR_POR_NUMERO * 4)} reales*\n"
+        f"*(Si pides más de 5 números en tu primera jugada, los primeros 5 tienen precio promocional y a partir del 6to número cada uno cuesta exactamente {VALOR_POR_NUMERO} reales).* \n\n"
+        f"⚠️ *¡Atención a las jugadas adicionales!* La promoción de paquetes aplica **únicamente para la primera jugada** de cada usuario. A partir de tu segunda jugada (incluso si mandas 2, 3, 4 o más números), **cada número tiene un costo fijo de {VALOR_POR_NUMERO} reales**, ya que no entra en la promoción.\n\n"
+        "Envía la palabra `lista` para ver los disponibles y escribe los que deseas separados por coma (ej: *7, 14*) aquí o en el grupo.\n"
+        "3️⃣ *Condición del Sorteo:* El sorteo se realizará **únicamente cuando los 100 números estén 100% ocupados y pagados**.\n"
+        "4️⃣ *Garantía de Devolución:* Si algún participante adquiere sus números pero **no desea esperar**, puede solicitar la **devolución íntegra de su dinero** con el administrador (@yordanisr).\n"
+        f"5️⃣ *Entrega del Premio:* El usuario ganador recibirá un premio de *{premio_actual} reales* (vía PIX o en Cuba en CUP a su familiar mediante la tasa del grupo de remesas). Grupo de WhatsApp obligatorio para tasa: https://chat.whatsapp.com/HEaEIKaEjksJRrWEKcIVEo?s=sh&p=a&ilr=0.\n"
+        "6️⃣ *Transparencia:* El ganador se define utilizando los resultados oficiales de la *Lotería de Florida* (Pick 3) en el horario nocturno.\n\n"
+        "🤝 *¡Ayúdanos a crecer!* Enlace de invitación al grupo: https://t.me/+didZDftOZAhmZjdh"
+    )
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -181,7 +202,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(respuesta, parse_mode="Markdown")
 
 async def reglas_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mensaje_reglas = f"🎯 *REGLAS OFICIALES - Gran Sorteo 100* 🎟️\n\n{TEXTO_REGLAS_OFICIAL}"
+    mensaje_reglas = f"🎯 *REGLAS OFICIALES - Gran Sorteo 100* 🎟️\n\n{obtener_texto_reglas()}"
     await update.message.reply_text(mensaje_reglas, parse_mode="Markdown")
 
 async def bloquear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -284,6 +305,7 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     num_formateado = num_str.zfill(2)
     
     ganador_mencion = f"[{ganador_nombre}](tg://user?id={ganador_id})" if ganador_id else ganador_nombre
+    premio_actual = calcular_premio_total()
 
     data_rifa["estado_rifa"] = "finalizada"
     guardar_data_completa(data_rifa)
@@ -296,7 +318,7 @@ async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"🎉 *¡Felicidades al Ganador!* 🎉\n\n"
-        f"El usuario {ganador_mencion} ha ganado con el número {num_formateado} un premio de 1000 reales. ¡Muchas felicidades! 🥳\n\n"
+        f"El usuario {ganador_mencion} ha ganado con el número {num_formateado} un premio de {premio_actual} reales. ¡Muchas felicidades! 🥳\n\n"
         f"Por favor, póngase en contacto con el administrador @yordanisr para recibir su premio (puede elegir que se le transfiera vía PIX o que se le envíe a su familiar en Cuba). Una vez que reciba la transferencia, le pedimos por favor que haga una captura de pantalla y la envíe a este grupo como evidencia de que recibió su pago y que todo funciona con total transparencia.",
         parse_mode="Markdown"
     )
@@ -307,7 +329,7 @@ async def bienvenida_nuevos_usuarios(update: Update, context: ContextTypes.DEFAU
             continue
         nombre = nuevo_usuario.first_name or "Amigo"
         mencion = f"[{nombre}](tg://user?id={nuevo_usuario.id})"
-        texto_bienvenida = f"🎯 *¡Bienvenido/a {mencion} a Gran Sorteo 100!* 🎟️\n\n{TEXTO_REGLAS_OFICIAL}"
+        texto_bienvenida = f"🎯 *¡Bienvenido/a {mencion} a Gran Sorteo 100!* 🎟️\n\n{obtener_texto_reglas()}"
         try:
             await update.message.reply_text(texto_bienvenida, parse_mode="Markdown")
         except Exception as e:
@@ -387,7 +409,7 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total_a_pagar = calcular_precio_total(cantidad_numeros, usuario_ya_tiene_compras=ya_tiene_compras)
 
             if ya_tiene_compras:
-                aviso_promocion = f"\n⚠️ *Aviso importante:* Como ya tienes una jugada previa registrada, esta nueva jugada de {cantidad_numeros} número(s) **no aplica para la promoción** y se cobra a precio estándar (*10 reales cada número*).\n"
+                aviso_promocion = f"\n⚠️ *Aviso importante:* Como ya tienes una jugada previa registrada, esta nueva jugada de {cantidad_numeros} número(s) **no aplica para la promoción** y se cobra a precio estándar (*{VALOR_POR_NUMERO} reales cada número*).\n"
             else:
                 aviso_promocion = f"\n✨ *¡Primera jugada detectada!* Aplica la tarifa promocional para tus {cantidad_numeros} número(s).\n"
 
