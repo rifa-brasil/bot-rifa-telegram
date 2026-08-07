@@ -133,6 +133,14 @@ def usuario_tiene_jugada_previa(user_id, data_completa):
             
     return False
 
+def obtener_teclado_idioma():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🇪🇸 Cubano (Español)", callback_data="lang_es"),
+            InlineKeyboardButton("🇧🇷 Brasileño (Português)", callback_data="lang_pt")
+        ]
+    ])
+
 def generar_texto_lista(lang="es"):
     data = obtener_data_completa()
     rifa = data["numeros"]
@@ -162,10 +170,7 @@ def generar_texto_lista(lang="es"):
         else:
             nombre = info.get("nombre", "Usuário")
             user_id = info.get("user_id")
-            if lang == "pt":
-                ocupado_txt = "Ocupado por"
-            else:
-                ocupado_txt = "Ocupado por"
+            ocupado_txt = "Ocupado por"
                 
             if user_id:
                 texto += f"🔴 *{num_str}*: {ocupado_txt} [{nombre}](tg://user?id={user_id})\n"
@@ -190,7 +195,7 @@ def obtener_texto_reglas(lang="es"):
         return (
             "📌 *REGRAS E DINÂMICA DO GRUPO (Grande Sorteio 100):*\n\n"
             "1️⃣ *Respeito:* Mantenha um ambiente de respeito absoluto para com todos os membros da comunidade e administradores.\n"
-            "2️⃣ *Números e Promoção:* Dispomose de 100 números (de 01 a 100).\n"
+            "2️⃣ *Números e Promoção:* Dispomos de 100 números (de 01 a 100).\n"
             f"✨ *Valores para sua primeira jogada (Promoção):*\n"
             f"• 1 número = *{VALOR_POR_NUMERO} reais*\n"
             f"• 2 números = *{int(VALOR_POR_NUMERO * 1.5)} reais*\n"
@@ -228,30 +233,21 @@ def obtener_texto_reglas(lang="es"):
         )
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [
-            InlineKeyboardButton("🇪🇸 Español", callback_data="lang_es"),
-            InlineKeyboardButton("🇧🇷 Português", callback_data="lang_pt")
-        ]
-    ]
-    await update.message.reply_text(
-        "🌍 *Selecciona tu idioma / Escolha seu idioma:*",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+    user_id = update.effective_user.id
+    data_rifa = obtener_data_completa()
+    lang = data_rifa.get("idiomas_usuarios", {}).get(str(user_id), "es")
+
+    respuesta = f"{generar_texto_lista(lang)}\n\n🌍 *¿Cuál es tu país / Qual é o seu país?*"
+    await update.message.reply_text(respuesta, reply_markup=obtener_teclado_idioma(), parse_mode="Markdown")
 
 async def reglas_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [
-            InlineKeyboardButton("🇪🇸 Ver en Español", callback_data="rules_es"),
-            InlineKeyboardButton("🇧🇷 Ver em Português", callback_data="rules_pt")
-        ]
-    ]
-    await update.message.reply_text(
-        "🌍 *Selecciona el idioma para las reglas / Escolha o idioma para as regras:*",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+    user_id = update.effective_user.id
+    data_rifa = obtener_data_completa()
+    lang = data_rifa.get("idiomas_usuarios", {}).get(str(user_id), "es")
+
+    titulo = "🎯 *REGLAS OFICIALES - Gran Sorteo 100*" if lang == "es" else "🎯 *REGRAS OFICIAIS - Grande Sorteo 100*"
+    mensaje_reglas = f"{titulo}\n\n{obtener_texto_reglas(lang)}\n\n🌍 *Selecciona tu idioma / Escolha seu idioma:*"
+    await update.message.reply_text(mensaje_reglas, reply_markup=obtener_teclado_idioma(), parse_mode="Markdown")
 
 async def bloquear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -279,7 +275,7 @@ async def desbloquear_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     data_rifa["estado_rifa"] = "activa"
     guardar_data_completa(data_rifa)
 
-    await update.message.reply_text("🟢 *La rifa ha sido desbloqueada.*\n\n" + generar_texto_lista("es"), parse_mode="Markdown")
+    await update.message.reply_text("🟢 *La rifa ha sido desbloqueada.*\n\n" + generar_texto_lista("es"), reply_markup=obtener_teclado_idioma(), parse_mode="Markdown")
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -288,7 +284,7 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
      
     borrar_y_recrear_base_datos()
-    await update.message.reply_text("🔄 *¡Gran Sorteo 100 ha sido reseteado con éxito!*\n\n" + generar_texto_lista("es"), parse_mode="Markdown")
+    await update.message.reply_text("🔄 *¡Gran Sorteo 100 ha sido reseteado con éxito!*\n\n" + generar_texto_lista("es"), reply_markup=obtener_teclado_idioma(), parse_mode="Markdown")
 
 async def liberar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -377,9 +373,9 @@ async def bienvenida_nuevos_usuarios(update: Update, context: ContextTypes.DEFAU
             continue
         nombre = nuevo_usuario.first_name or "Amigo"
         mencion = f"[{nombre}](tg://user?id={nuevo_usuario.id})"
-        texto_bienvenida = f"🎯 *¡Bienvenido/a {mencion} a Gran Sorteo 100! / Bem-vindo/a!* 🎟️\n\n{obtener_texto_reglas('es')}\n\n---\n\n{obtener_texto_reglas('pt')}"
+        texto_bienvenida = f"🎯 *¡Bienvenido/a {mencion} a Gran Sorteo 100! / Bem-vindo/a!* 🎟️\n\n{obtener_texto_reglas('es')}\n\n---\n\n{obtener_texto_reglas('pt')}\n\n🌍 *¿De qué país eres o qué idioma prefieres? / Qual é o seu país ou idioma preferido?*"
         try:
-            await update.message.reply_text(texto_bienvenida, parse_mode="Markdown")
+            await update.message.reply_text(texto_bienvenida, reply_markup=obtener_teclado_idioma(), parse_mode="Markdown")
         except Exception as e:
             print(f"Error enviando bienvenida: {e}")
 
@@ -407,6 +403,7 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if comando in ["hola", "buenas", "lista", "inicio", "rifa", "sorteo"]:
         await update.message.reply_text(
             f"¡Hola {usuario_mencion}! Estado actual de Gran Sorteo 100:\n\n{generar_texto_lista(lang_usuario)}",
+            reply_markup=obtener_teclado_idioma(),
             parse_mode="Markdown"
         )
         return
@@ -518,10 +515,12 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data_callback = query.data
 
-    # Manejo de selección de idioma o reglas por idioma para cualquier usuario
-    if data_callback.startswith("lang_") or data_callback.startswith("rules_"):
+    # Manejo dinámico de selección de idioma directamente desde el grupo
+    if data_callback.startswith("lang_"):
         lang = data_callback.split("_")[1]
         user_id = query.from_user.id
+        user_nombre = query.from_user.first_name or "Usuario"
+        user_mencion = f"[{user_nombre}](tg://user?id={user_id})"
         
         data_rifa = obtener_data_completa()
         if "idiomas_usuarios" not in data_rifa:
@@ -529,17 +528,18 @@ async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data_rifa["idiomas_usuarios"][str(user_id)] = lang
         guardar_data_completa(data_rifa)
 
-        if data_callback.startswith("lang_"):
-            texto_resp = f"✅ Idioma cambiado a **Español**." if lang == "es" else f"✅ Idioma alterado para **Português**."
-            texto_resp += f"\n\n{generar_texto_lista(lang)}"
-            await query.edit_message_text(texto_resp, parse_mode="Markdown")
+        if lang == "es":
+            texto_resp = f"✅ {user_mencion} ha seleccionado: **Cubano (Español)** 🇨🇺\n\n{generar_texto_lista('es')}"
         else:
-            texto_reglas = obtener_texto_reglas(lang)
-            titulo = "🎯 *REGLAS OFICIALES*" if lang == "es" else "🎯 *REGRAS OFICIAIS*"
-            await query.edit_message_text(f"{titulo}\n\n{texto_reglas}", parse_mode="Markdown")
+            texto_resp = f"✅ {user_mencion} selecionou: **Brasileiro (Português)** 🇧🇷\n\n{generar_texto_lista('pt')}"
+
+        try:
+            await query.edit_message_text(texto_resp, reply_markup=obtener_teclado_idioma(), parse_mode="Markdown")
+        except Exception as e:
+            print(f"Error actualizando mensaje de idioma: {e}")
         return
 
-    # De aquí en adelante, acciones exclusivas del administrador
+    # Acciones exclusivas del administrador
     if query.from_user.id != ADMIN_TELEGRAM_ID:
         await query.edit_message_text("⛔ No estás autorizado. / Não autorizado.")
         return
