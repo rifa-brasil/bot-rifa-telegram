@@ -33,12 +33,18 @@ DB_FILE = "database.db"
 
 
 # =========================================================
-# COMPROBAR TOKEN
+# COMPROBAR CONFIGURACIÓN
 # =========================================================
 
 if not TELEGRAM_TOKEN:
     raise ValueError(
         "❌ No existe la variable TELEGRAM_TOKEN"
+    )
+
+
+if ADMIN_TELEGRAM_ID == 0:
+    print(
+        "⚠️ ADVERTENCIA: ADMIN_TELEGRAM_ID no está configurado."
     )
 
 
@@ -131,11 +137,13 @@ def inicializar_base_datos():
 
     conn.close()
 
-    print("🗄️ Base de datos inicializada correctamente.")
+    print(
+        "🗄️ Base de datos inicializada correctamente."
+    )
 
 
 # =========================================================
-# BUSCAR USUARIO
+# OBTENER USUARIO
 # =========================================================
 
 def obtener_usuario(telegram_id):
@@ -170,7 +178,7 @@ def obtener_usuario(telegram_id):
 
 
 # =========================================================
-# CREAR USUARIO
+# REGISTRAR USUARIO
 # =========================================================
 
 def registrar_usuario(
@@ -183,8 +191,9 @@ def registrar_usuario(
         telegram_id
     )
 
-    # Si ya existe, actualizamos
-    # nombre y username.
+    # -----------------------------------------------------
+    # USUARIO YA EXISTE
+    # -----------------------------------------------------
 
     if usuario:
 
@@ -212,8 +221,9 @@ def registrar_usuario(
         return False
 
 
-    # Código de referido basado
-    # en el ID de Telegram.
+    # -----------------------------------------------------
+    # NUEVO USUARIO
+    # -----------------------------------------------------
 
     codigo_referido = str(
         telegram_id
@@ -261,6 +271,174 @@ def registrar_usuario(
     conn.close()
 
     return True
+
+
+# =========================================================
+# COMPROBAR ADMINISTRADOR
+# =========================================================
+
+def es_admin(user_id):
+
+    return user_id == ADMIN_TELEGRAM_ID
+
+
+# =========================================================
+# BACKUP DE BASE DE DATOS
+# =========================================================
+
+async def backup_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user = update.effective_user
+
+    # -----------------------------------------------------
+    # SEGURIDAD
+    # -----------------------------------------------------
+
+    if not es_admin(user.id):
+
+        await update.message.reply_text(
+            "⛔ No tienes permiso para utilizar este comando."
+        )
+
+        print(
+            f"⚠️ Intento de backup no autorizado: "
+            f"{user.id}"
+        )
+
+        return
+
+
+    # -----------------------------------------------------
+    # COMPROBAR BASE DE DATOS
+    # -----------------------------------------------------
+
+    if not os.path.exists(DB_FILE):
+
+        await update.message.reply_text(
+            "❌ No se encontró la base de datos."
+        )
+
+        return
+
+
+    # -----------------------------------------------------
+    # NOMBRE DEL RESPALDO
+    # -----------------------------------------------------
+
+    fecha = datetime.now().strftime(
+        "%Y-%m-%d_%H-%M-%S"
+    )
+
+    backup_file = (
+        f"database_backup_{fecha}.db"
+    )
+
+
+    try:
+
+        # -------------------------------------------------
+        # COPIA SEGURA DE SQLITE
+        # -------------------------------------------------
+
+        source = sqlite3.connect(
+            DB_FILE
+        )
+
+        destination = sqlite3.connect(
+            backup_file
+        )
+
+        with destination:
+
+            source.backup(
+                destination
+            )
+
+        destination.close()
+
+        source.close()
+
+
+        # -------------------------------------------------
+        # INFORMAR AL ADMIN
+        # -------------------------------------------------
+
+        await update.message.reply_text(
+            "📦 Preparando respaldo de la base de datos..."
+        )
+
+
+        # -------------------------------------------------
+        # ENVIAR ARCHIVO
+        # -------------------------------------------------
+
+        with open(
+            backup_file,
+            "rb"
+        ) as archivo:
+
+            await update.message.reply_document(
+                document=archivo,
+                filename=backup_file,
+                caption=(
+                    "✅ *RESPALDO COMPLETADO*\n\n"
+                    "🗄️ Base de datos: "
+                    f"`{DB_FILE}`\n"
+                    f"📁 Archivo: `{backup_file}`\n"
+                    f"📅 Fecha: {fecha}\n\n"
+                    "🔐 Guarda este archivo en un "
+                    "lugar seguro."
+                ),
+                parse_mode="Markdown"
+            )
+
+
+        print(
+            f"✅ Backup enviado al administrador: "
+            f"{backup_file}"
+        )
+
+
+    except Exception as e:
+
+        print(
+            f"❌ Error creando backup: {e}"
+        )
+
+        await update.message.reply_text(
+            "❌ Ocurrió un error al crear "
+            "el respaldo."
+        )
+
+
+    finally:
+
+        # -------------------------------------------------
+        # ELIMINAR COPIA TEMPORAL DEL SERVIDOR
+        # -------------------------------------------------
+
+        if os.path.exists(backup_file):
+
+            try:
+
+                os.remove(
+                    backup_file
+                )
+
+                print(
+                    f"🗑️ Copia temporal eliminada: "
+                    f"{backup_file}"
+                )
+
+            except Exception as e:
+
+                print(
+                    f"⚠️ No se pudo eliminar "
+                    f"la copia temporal: {e}"
+                )
 
 
 # =========================================================
@@ -322,7 +500,7 @@ def menu_principal():
 
 
 # =========================================================
-# TEXTO DEL MENÚ
+# TEXTO INICIO
 # =========================================================
 
 def texto_inicio(telegram_id):
@@ -340,7 +518,9 @@ def texto_inicio(telegram_id):
     nombre = usuario[2] or "Usuario"
 
     saldo = usuario[4] or 0
+
     invertido = usuario[5] or 0
+
     ganancias = usuario[6] or 0
 
     return (
@@ -372,8 +552,6 @@ async def start_command(
     username = user.username or ""
 
     telegram_id = user.id
-
-    # Registrar o actualizar usuario.
 
     nuevo = registrar_usuario(
         telegram_id,
@@ -764,7 +942,7 @@ async def main():
 
     await start_web_server()
 
-    # Crear aplicación de Telegram.
+    # Crear aplicación Telegram.
 
     app = (
         ApplicationBuilder()
@@ -772,7 +950,9 @@ async def main():
         .build()
     )
 
-    # /start
+    # -----------------------------------------------------
+    # COMANDOS
+    # -----------------------------------------------------
 
     app.add_handler(
         CommandHandler(
@@ -781,7 +961,16 @@ async def main():
         )
     )
 
-    # Botones
+    app.add_handler(
+        CommandHandler(
+            "backup",
+            backup_command
+        )
+    )
+
+    # -----------------------------------------------------
+    # BOTONES
+    # -----------------------------------------------------
 
     app.add_handler(
         CallbackQueryHandler(
@@ -793,7 +982,9 @@ async def main():
         "🤖 Bot de Inversión iniciado correctamente..."
     )
 
-    # Inicializar Telegram.
+    # -----------------------------------------------------
+    # INICIAR TELEGRAM
+    # -----------------------------------------------------
 
     await app.initialize()
 
@@ -801,7 +992,9 @@ async def main():
 
     await app.updater.start_polling()
 
-    # Mantener proceso activo.
+    # -----------------------------------------------------
+    # MANTENER PROCESO ACTIVO
+    # -----------------------------------------------------
 
     await asyncio.Event().wait()
 
