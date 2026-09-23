@@ -16,8 +16,7 @@ from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
     CommandHandler,
-    CallbackQueryHandler,
-    filters
+    CallbackQueryHandler
 )
 
 
@@ -64,15 +63,24 @@ async def handle_web(request):
 
 
 async def start_web_server():
+
     app = web.Application()
 
-    app.router.add_get("/", handle_web)
+    app.router.add_get(
+        "/",
+        handle_web
+    )
 
     runner = web.AppRunner(app)
 
     await runner.setup()
 
-    port = int(os.environ.get("PORT", 10000))
+    port = int(
+        os.environ.get(
+            "PORT",
+            10000
+        )
+    )
 
     site = web.TCPSite(
         runner,
@@ -93,7 +101,9 @@ async def start_web_server():
 
 def inicializar_base_datos():
 
-    conexion = sqlite3.connect(DB_FILE)
+    conexion = sqlite3.connect(
+        DB_FILE
+    )
 
     cursor = conexion.cursor()
 
@@ -116,16 +126,20 @@ def inicializar_base_datos():
 
     conexion.close()
 
-    print("🗄️ Base de datos inicializada correctamente.")
+    print(
+        "🗄️ Base de datos inicializada correctamente."
+    )
 
 
 # =========================================================
-# REGISTRAR / ACTUALIZAR USUARIO
+# REGISTRAR USUARIO
 # =========================================================
 
 def registrar_usuario(user):
 
-    conexion = sqlite3.connect(DB_FILE)
+    conexion = sqlite3.connect(
+        DB_FILE
+    )
 
     cursor = conexion.cursor()
 
@@ -166,8 +180,6 @@ def registrar_usuario(user):
             )
         )
 
-        nuevo = False
-
     else:
 
         cursor.execute(
@@ -194,22 +206,20 @@ def registrar_usuario(user):
             )
         )
 
-        nuevo = True
-
     conexion.commit()
 
     conexion.close()
 
-    return nuevo
-
 
 # =========================================================
-# OBTENER DATOS DEL USUARIO
+# OBTENER USUARIO
 # =========================================================
 
 def obtener_usuario(telegram_id):
 
-    conexion = sqlite3.connect(DB_FILE)
+    conexion = sqlite3.connect(
+        DB_FILE
+    )
 
     cursor = conexion.cursor()
 
@@ -239,7 +249,7 @@ def obtener_usuario(telegram_id):
 
 
 # =========================================================
-# COMPROBAR ADMIN
+# COMPROBAR ADMINISTRADOR
 # =========================================================
 
 def es_admin(user_id):
@@ -248,7 +258,7 @@ def es_admin(user_id):
 
 
 # =========================================================
-# MENÚ PRINCIPAL
+# MENÚ PRINCIPAL DE USUARIOS
 # =========================================================
 
 def crear_menu_principal():
@@ -274,7 +284,6 @@ def crear_menu_principal():
                 "💰 Depositar",
                 callback_data="depositar"
             ),
-
             InlineKeyboardButton(
                 "💸 Retirar",
                 callback_data="retirar"
@@ -304,7 +313,52 @@ def crear_menu_principal():
 
     ]
 
-    return InlineKeyboardMarkup(botones)
+    return InlineKeyboardMarkup(
+        botones
+    )
+
+
+# =========================================================
+# MENÚ ADMINISTRADOR
+# =========================================================
+
+def crear_menu_admin():
+
+    botones = [
+
+        [
+            InlineKeyboardButton(
+                "👥 Usuarios",
+                callback_data="admin_usuarios"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🗄️ Crear respaldo",
+                callback_data="admin_backup"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "📊 Estado del sistema",
+                callback_data="admin_status"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "⬅️ Menú usuario",
+                callback_data="inicio"
+            )
+        ]
+
+    ]
+
+    return InlineKeyboardMarkup(
+        botones
+    )
 
 
 # =========================================================
@@ -325,7 +379,7 @@ async def start_command(
     texto = (
         f"👋 Hola, *{nombre}*.\n\n"
         "🤖 Bienvenido a nuestro bot de trading.\n\n"
-        "Selecciona una opción del menú:"
+        "Selecciona una opción:"
     )
 
     await update.message.reply_text(
@@ -336,7 +390,52 @@ async def start_command(
 
 
 # =========================================================
-# BOTÓN MI CUENTA
+# /ADMIN
+# =========================================================
+
+async def admin_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user = update.effective_user
+
+    # -----------------------------------------------------
+    # BLOQUEAR USUARIOS NORMALES
+    # -----------------------------------------------------
+
+    if not es_admin(user.id):
+
+        await update.message.reply_text(
+            "⛔ Comando no disponible."
+        )
+
+        print(
+            f"⚠️ Intento de acceso administrativo: "
+            f"{user.id}"
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # PANEL ADMIN
+    # -----------------------------------------------------
+
+    texto = (
+        "🔐 *PANEL DE ADMINISTRADOR*\n\n"
+        "Bienvenido al área administrativa.\n\n"
+        "Selecciona una opción:"
+    )
+
+    await update.message.reply_text(
+        texto,
+        reply_markup=crear_menu_admin(),
+        parse_mode="Markdown"
+    )
+
+
+# =========================================================
+# MOSTRAR CUENTA
 # =========================================================
 
 async def mostrar_cuenta(
@@ -344,13 +443,17 @@ async def mostrar_cuenta(
     user
 ):
 
-    usuario = obtener_usuario(user.id)
+    usuario = obtener_usuario(
+        user.id
+    )
 
     if not usuario:
 
         registrar_usuario(user)
 
-        usuario = obtener_usuario(user.id)
+        usuario = obtener_usuario(
+            user.id
+        )
 
     (
         telegram_id,
@@ -367,7 +470,8 @@ async def mostrar_cuenta(
     texto = (
         "👤 *MI CUENTA*\n\n"
         f"🧑 Nombre: {nombre}\n"
-        f"🔹 Usuario: @{username if username else 'Sin username'}\n"
+        f"🔹 Usuario: "
+        f"@{username if username else 'Sin username'}\n"
         f"🆔 ID: `{telegram_id}`\n\n"
         f"💰 Saldo: ${saldo:.2f}\n"
         f"📊 Invertido: ${invertido:.2f}\n"
@@ -392,6 +496,176 @@ async def mostrar_cuenta(
 
 
 # =========================================================
+# INFORMACIÓN DEL SISTEMA PARA ADMIN
+# =========================================================
+
+def obtener_estado_sistema():
+
+    if not os.path.exists(
+        DB_FILE
+    ):
+
+        return (
+            "🔴 Base de datos no encontrada."
+        )
+
+    tamaño = os.path.getsize(
+        DB_FILE
+    )
+
+    conexion = sqlite3.connect(
+        DB_FILE
+    )
+
+    cursor = conexion.cursor()
+
+    cursor.execute(
+        "SELECT COUNT(*) FROM usuarios"
+    )
+
+    usuarios = cursor.fetchone()[0]
+
+    conexion.close()
+
+    return (
+        "📊 *ESTADO DEL SISTEMA*\n\n"
+        "🟢 Bot funcionando\n"
+        "🟢 Base de datos funcionando\n\n"
+        f"👥 Usuarios registrados: "
+        f"*{usuarios}*\n"
+        f"🗄️ Base de datos: `{DB_FILE}`\n"
+        f"📦 Tamaño: `{tamaño} bytes`"
+    )
+
+
+# =========================================================
+# CREAR BACKUP
+# =========================================================
+
+async def crear_backup(
+    chat_id,
+    context
+):
+
+    if not os.path.exists(
+        DB_FILE
+    ):
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="❌ No se encontró la base de datos."
+        )
+
+        return
+
+    fecha = datetime.now().strftime(
+        "%Y-%m-%d_%H-%M-%S"
+    )
+
+    backup_file = (
+        f"database_backup_{fecha}.db"
+    )
+
+    try:
+
+        print(
+            f"📦 Creando respaldo: "
+            f"{backup_file}"
+        )
+
+        shutil.copy2(
+            DB_FILE,
+            backup_file
+        )
+
+        if not os.path.exists(
+            backup_file
+        ):
+
+            raise Exception(
+                "La copia no fue creada."
+            )
+
+        tamaño = os.path.getsize(
+            backup_file
+        )
+
+        with open(
+            backup_file,
+            "rb"
+        ) as archivo:
+
+            await context.bot.send_document(
+
+                chat_id=chat_id,
+
+                document=archivo,
+
+                filename=backup_file,
+
+                caption=(
+                    "✅ *RESPALDO COMPLETADO*\n\n"
+                    f"🗄️ Base de datos: `{DB_FILE}`\n"
+                    f"📁 Archivo: `{backup_file}`\n"
+                    f"📦 Tamaño: `{tamaño} bytes`\n"
+                    f"📅 Fecha: `{fecha}`\n\n"
+                    "🔐 Guarda este archivo "
+                    "en un lugar seguro."
+                ),
+
+                parse_mode="Markdown"
+            )
+
+        print(
+            "✅ Backup enviado correctamente."
+        )
+
+    except Exception as e:
+
+        error = str(e)
+
+        print(
+            f"❌ ERROR REAL DEL BACKUP: {error}"
+        )
+
+        await context.bot.send_message(
+
+            chat_id=chat_id,
+
+            text=(
+                "❌ *Error al crear el respaldo.*\n\n"
+                f"🔎 Error real:\n`{error}`"
+            ),
+
+            parse_mode="Markdown"
+        )
+
+    finally:
+
+        if os.path.exists(
+            backup_file
+        ):
+
+            try:
+
+                os.remove(
+                    backup_file
+                )
+
+                print(
+                    f"🗑️ Copia temporal eliminada: "
+                    f"{backup_file}"
+                )
+
+            except Exception as e:
+
+                print(
+                    f"⚠️ No se pudo eliminar "
+                    f"la copia temporal: {e}"
+                )
+
+
+# =========================================================
 # CALLBACKS
 # =========================================================
 
@@ -411,9 +685,9 @@ async def boton_callback(
     accion = query.data
 
 
-    # -----------------------------------------------------
-    # INICIO
-    # -----------------------------------------------------
+    # =====================================================
+    # MENÚ PRINCIPAL
+    # =====================================================
 
     if accion == "inicio":
 
@@ -428,31 +702,33 @@ async def boton_callback(
             parse_mode="Markdown"
         )
 
+        return
 
-    # -----------------------------------------------------
+
+    # =====================================================
     # CUENTA
-    # -----------------------------------------------------
+    # =====================================================
 
-    elif accion == "cuenta":
+    if accion == "cuenta":
 
         await mostrar_cuenta(
             query,
             user
         )
 
+        return
 
-    # -----------------------------------------------------
+
+    # =====================================================
     # INVERSIONES
-    # -----------------------------------------------------
+    # =====================================================
 
-    elif accion == "inversiones":
+    if accion == "inversiones":
 
         texto = (
             "📈 *INVERSIONES*\n\n"
             "Esta sección estará disponible "
-            "en la siguiente etapa.\n\n"
-            "Aquí podremos mostrar los planes "
-            "de inversión y el estado de cada inversión."
+            "en la siguiente etapa."
         )
 
         teclado = InlineKeyboardMarkup([
@@ -470,19 +746,19 @@ async def boton_callback(
             parse_mode="Markdown"
         )
 
+        return
 
-    # -----------------------------------------------------
+
+    # =====================================================
     # DEPOSITAR
-    # -----------------------------------------------------
+    # =====================================================
 
-    elif accion == "depositar":
+    if accion == "depositar":
 
         texto = (
             "💰 *DEPOSITAR*\n\n"
             "La función de depósitos se configurará "
-            "en la siguiente etapa.\n\n"
-            "Aquí posteriormente aparecerán las "
-            "instrucciones para realizar un depósito."
+            "en la siguiente etapa."
         )
 
         teclado = InlineKeyboardMarkup([
@@ -500,19 +776,19 @@ async def boton_callback(
             parse_mode="Markdown"
         )
 
+        return
 
-    # -----------------------------------------------------
+
+    # =====================================================
     # RETIRAR
-    # -----------------------------------------------------
+    # =====================================================
 
-    elif accion == "retirar":
+    if accion == "retirar":
 
         texto = (
             "💸 *RETIRAR*\n\n"
             "La función de retiros se configurará "
-            "en la siguiente etapa.\n\n"
-            "Las solicitudes podrán ser revisadas "
-            "manualmente por el administrador."
+            "en la siguiente etapa."
         )
 
         teclado = InlineKeyboardMarkup([
@@ -530,14 +806,18 @@ async def boton_callback(
             parse_mode="Markdown"
         )
 
+        return
 
-    # -----------------------------------------------------
+
+    # =====================================================
     # REFERIDOS
-    # -----------------------------------------------------
+    # =====================================================
 
-    elif accion == "referidos":
+    if accion == "referidos":
 
-        usuario = obtener_usuario(user.id)
+        usuario = obtener_usuario(
+            user.id
+        )
 
         codigo = (
             usuario[6]
@@ -568,12 +848,14 @@ async def boton_callback(
             parse_mode="Markdown"
         )
 
+        return
 
-    # -----------------------------------------------------
+
+    # =====================================================
     # HISTORIAL
-    # -----------------------------------------------------
+    # =====================================================
 
-    elif accion == "historial":
+    if accion == "historial":
 
         texto = (
             "📜 *HISTORIAL*\n\n"
@@ -596,21 +878,21 @@ async def boton_callback(
             parse_mode="Markdown"
         )
 
+        return
 
-    # -----------------------------------------------------
+
+    # =====================================================
     # INFORMACIÓN
-    # -----------------------------------------------------
+    # =====================================================
 
-    elif accion == "informacion":
+    if accion == "informacion":
 
         texto = (
             "ℹ️ *INFORMACIÓN*\n\n"
             "🤖 Plataforma de trading\n\n"
             "Esta aplicación permitirá gestionar "
             "usuarios, depósitos, inversiones, "
-            "retiros y movimientos desde Telegram.\n\n"
-            "🔐 Las operaciones administrativas "
-            "están restringidas al administrador."
+            "retiros y movimientos desde Telegram."
         )
 
         teclado = InlineKeyboardMarkup([
@@ -628,9 +910,157 @@ async def boton_callback(
             parse_mode="Markdown"
         )
 
+        return
+
+
+    # =====================================================
+    # PROTECCIÓN ADMINISTRATIVA
+    # =====================================================
+    #
+    # MUY IMPORTANTE:
+    # Aunque un usuario normal intente fabricar
+    # manualmente un callback como "admin_usuarios",
+    # "admin_backup" o "admin_status", será bloqueado.
+    #
+
+    if accion.startswith("admin_"):
+
+        if not es_admin(user.id):
+
+            await query.answer(
+                "⛔ No tienes permiso.",
+                show_alert=True
+            )
+
+            print(
+                f"⚠️ Intento de acceso admin "
+                f"por usuario: {user.id}"
+            )
+
+            return
+
+
+    # =====================================================
+    # ADMIN - USUARIOS
+    # =====================================================
+
+    if accion == "admin_usuarios":
+
+        if not es_admin(user.id):
+            return
+
+        conexion = sqlite3.connect(
+            DB_FILE
+        )
+
+        cursor = conexion.cursor()
+
+        cursor.execute(
+            "SELECT COUNT(*) FROM usuarios"
+        )
+
+        cantidad = cursor.fetchone()[0]
+
+        conexion.close()
+
+        texto = (
+            "👥 *USUARIOS REGISTRADOS*\n\n"
+            f"Total de usuarios: *{cantidad}*"
+        )
+
+        teclado = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "⬅️ Panel admin",
+                    callback_data="admin_inicio"
+                )
+            ]
+        ])
+
+        await query.edit_message_text(
+            texto,
+            reply_markup=teclado,
+            parse_mode="Markdown"
+        )
+
+        return
+
+
+    # =====================================================
+    # ADMIN - BACKUP
+    # =====================================================
+
+    if accion == "admin_backup":
+
+        if not es_admin(user.id):
+            return
+
+        await query.edit_message_text(
+            "📦 Preparando respaldo de la base de datos..."
+        )
+
+        await crear_backup(
+            user.id,
+            context
+        )
+
+        return
+
+
+    # =====================================================
+    # ADMIN - STATUS
+    # =====================================================
+
+    if accion == "admin_status":
+
+        if not es_admin(user.id):
+            return
+
+        texto = obtener_estado_sistema()
+
+        teclado = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "⬅️ Panel admin",
+                    callback_data="admin_inicio"
+                )
+            ]
+        ])
+
+        await query.edit_message_text(
+            texto,
+            reply_markup=teclado,
+            parse_mode="Markdown"
+        )
+
+        return
+
+
+    # =====================================================
+    # VOLVER AL PANEL ADMIN
+    # =====================================================
+
+    if accion == "admin_inicio":
+
+        if not es_admin(user.id):
+            return
+
+        texto = (
+            "🔐 *PANEL DE ADMINISTRADOR*\n\n"
+            "Selecciona una opción:"
+        )
+
+        await query.edit_message_text(
+            texto,
+            reply_markup=crear_menu_admin(),
+            parse_mode="Markdown"
+        )
+
+        return
+
 
 # =========================================================
-# BACKUP DE LA BASE DE DATOS
+# /BACKUP
 # =========================================================
 
 async def backup_command(
@@ -640,184 +1070,31 @@ async def backup_command(
 
     user = update.effective_user
 
-
-    # -----------------------------------------------------
-    # COMPROBAR ADMIN
-    # -----------------------------------------------------
-
     if not es_admin(user.id):
 
         await update.message.reply_text(
-            "⛔ No tienes permiso para utilizar este comando."
+            "⛔ Comando no disponible."
         )
 
         print(
-            f"⚠️ Intento de backup no autorizado: {user.id}"
+            f"⚠️ Intento de /backup por usuario: "
+            f"{user.id}"
         )
 
         return
-
-
-    # -----------------------------------------------------
-    # COMPROBAR BASE DE DATOS
-    # -----------------------------------------------------
-
-    if not os.path.exists(DB_FILE):
-
-        await update.message.reply_text(
-            "❌ No se encontró la base de datos."
-        )
-
-        print(
-            f"❌ No existe el archivo: {DB_FILE}"
-        )
-
-        return
-
-
-    # -----------------------------------------------------
-    # MENSAJE INICIAL
-    # -----------------------------------------------------
 
     await update.message.reply_text(
         "📦 Preparando respaldo de la base de datos..."
     )
 
-
-    fecha = datetime.now().strftime(
-        "%Y-%m-%d_%H-%M-%S"
+    await crear_backup(
+        user.id,
+        context
     )
-
-    backup_file = (
-        f"database_backup_{fecha}.db"
-    )
-
-
-    # -----------------------------------------------------
-    # CREAR COPIA
-    # -----------------------------------------------------
-
-    try:
-
-        print(
-            f"📦 Creando respaldo de {DB_FILE}..."
-        )
-
-        shutil.copy2(
-            DB_FILE,
-            backup_file
-        )
-
-        print(
-            f"✅ Copia creada: {backup_file}"
-        )
-
-
-        # -------------------------------------------------
-        # COMPROBAR COPIA
-        # -------------------------------------------------
-
-        if not os.path.exists(backup_file):
-
-            raise Exception(
-                "La copia no fue creada."
-            )
-
-
-        tamaño = os.path.getsize(
-            backup_file
-        )
-
-        print(
-            f"📁 Tamaño del backup: {tamaño} bytes"
-        )
-
-
-        # -------------------------------------------------
-        # ENVIAR ARCHIVO A TELEGRAM
-        # -------------------------------------------------
-
-        with open(
-            backup_file,
-            "rb"
-        ) as archivo:
-
-            await update.message.reply_document(
-
-                document=archivo,
-
-                filename=backup_file,
-
-                caption=(
-                    "✅ *RESPALDO COMPLETADO*\n\n"
-                    f"🗄️ Base de datos: `{DB_FILE}`\n"
-                    f"📁 Archivo: `{backup_file}`\n"
-                    f"📦 Tamaño: `{tamaño} bytes`\n"
-                    f"📅 Fecha: `{fecha}`\n\n"
-                    "🔐 Guarda este archivo en un "
-                    "lugar seguro."
-                ),
-
-                parse_mode="Markdown"
-            )
-
-
-        print(
-            f"✅ Backup enviado correctamente: "
-            f"{backup_file}"
-        )
-
-
-    # -----------------------------------------------------
-    # ERROR
-    # -----------------------------------------------------
-
-    except Exception as e:
-
-        error = str(e)
-
-        print(
-            f"❌ ERROR REAL DEL BACKUP: {error}"
-        )
-
-        await update.message.reply_text(
-
-            "❌ *Error al crear el respaldo.*\n\n"
-            f"🔎 Error real:\n`{error}`",
-
-            parse_mode="Markdown"
-        )
-
-
-    # -----------------------------------------------------
-    # ELIMINAR COPIA TEMPORAL
-    # -----------------------------------------------------
-
-    finally:
-
-        if os.path.exists(backup_file):
-
-            try:
-
-                os.remove(
-                    backup_file
-                )
-
-                print(
-                    f"🗑️ Copia temporal eliminada: "
-                    f"{backup_file}"
-                )
-
-            except Exception as e:
-
-                print(
-                    "⚠️ No se pudo eliminar la "
-                    f"copia temporal: {e}"
-                )
 
 
 # =========================================================
-# COMANDO PARA COMPROBAR ESTADO
+# /STATUS
 # =========================================================
 
 async def status_command(
@@ -830,34 +1107,12 @@ async def status_command(
     if not es_admin(user.id):
 
         await update.message.reply_text(
-            "⛔ No tienes permiso para utilizar este comando."
+            "⛔ Comando no disponible."
         )
 
         return
 
-    existe = os.path.exists(DB_FILE)
-
-    if existe:
-
-        tamaño = os.path.getsize(
-            DB_FILE
-        )
-
-        texto = (
-            "🤖 *ESTADO DEL BOT*\n\n"
-            "🟢 Bot funcionando\n"
-            "🟢 Base de datos encontrada\n"
-            f"🗄️ Archivo: `{DB_FILE}`\n"
-            f"📦 Tamaño: `{tamaño} bytes`\n"
-        )
-
-    else:
-
-        texto = (
-            "🤖 *ESTADO DEL BOT*\n\n"
-            "🟢 Bot funcionando\n"
-            "🔴 Base de datos no encontrada"
-        )
+    texto = obtener_estado_sistema()
 
     await update.message.reply_text(
         texto,
@@ -866,7 +1121,7 @@ async def status_command(
 
 
 # =========================================================
-# COMANDO ADMINISTRATIVO DE USUARIOS
+# /USUARIOS
 # =========================================================
 
 async def usuarios_command(
@@ -879,11 +1134,10 @@ async def usuarios_command(
     if not es_admin(user.id):
 
         await update.message.reply_text(
-            "⛔ No tienes permiso para utilizar este comando."
+            "⛔ Comando no disponible."
         )
 
         return
-
 
     conexion = sqlite3.connect(
         DB_FILE
@@ -898,7 +1152,6 @@ async def usuarios_command(
     cantidad = cursor.fetchone()[0]
 
     conexion.close()
-
 
     await update.message.reply_text(
 
@@ -916,7 +1169,7 @@ async def usuarios_command(
 async def main():
 
     # -----------------------------------------------------
-    # INICIALIZAR BASE DE DATOS
+    # BASE DE DATOS
     # -----------------------------------------------------
 
     inicializar_base_datos()
@@ -930,7 +1183,7 @@ async def main():
 
 
     # -----------------------------------------------------
-    # CREAR APLICACIÓN TELEGRAM
+    # BOT
     # -----------------------------------------------------
 
     app = (
@@ -941,13 +1194,25 @@ async def main():
 
 
     # -----------------------------------------------------
-    # COMANDOS
+    # COMANDOS USUARIOS
     # -----------------------------------------------------
 
     app.add_handler(
         CommandHandler(
             "start",
             start_command
+        )
+    )
+
+
+    # -----------------------------------------------------
+    # COMANDOS ADMIN
+    # -----------------------------------------------------
+
+    app.add_handler(
+        CommandHandler(
+            "admin",
+            admin_command
         )
     )
 
@@ -985,7 +1250,7 @@ async def main():
 
 
     # -----------------------------------------------------
-    # INICIAR BOT
+    # INICIAR
     # -----------------------------------------------------
 
     print(
@@ -1000,14 +1265,14 @@ async def main():
 
 
     # -----------------------------------------------------
-    # MANTENER PROCESO ACTIVO
+    # MANTENER ACTIVO
     # -----------------------------------------------------
 
     await asyncio.Event().wait()
 
 
 # =========================================================
-# EJECUTAR
+# EJECUCIÓN
 # =========================================================
 
 if __name__ == "__main__":
