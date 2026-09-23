@@ -1,2078 +1,1991 @@
 import os
-import sqlite3
-import shutil
+import json
 import uuid
 import asyncio
-from datetime import datetime, timedelta, timezone
-
 from aiohttp import web
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InputFile,
-)
-from telegram.constants import ChatType
-from telegram.ext import (
-    ApplicationBuilder,
-    ContextTypes,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ConversationHandler,
-    filters,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
-# =========================================================
-# CONFIGURACIÓN
-# =========================================================
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
-ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0") or "0")
-
-# Wallet TRC20/USDT que recibirán los depósitos.
-# CONFIGÚRALA EN RENDER COMO VARIABLE DE ENTORNO.
-USDT_TRC20_ADDRESS = os.getenv("USDT_TRC20_ADDRESS", "").strip()
-
-DB_FILE = "database.db"
-BACKUP_DIR = "backups"
-
-# Plan de prueba/configurable.
-# No representa una promesa de rentabilidad: son parámetros del sistema.
-PLAN_NAME = os.getenv("PLAN_NAME", "Plan Inicial")
-DAILY_RATE = float(os.getenv("DAILY_RATE", "0.01"))          # 1% diario
-TARGET_MULTIPLIER = float(os.getenv("TARGET_MULTIPLIER", "2.0"))
-MIN_INVESTMENT = float(os.getenv("MIN_INVESTMENT", "10"))
-MAX_INVESTMENT = float(os.getenv("MAX_INVESTMENT", "1000000"))
-
-# Estados de conversación
-DEP_AMOUNT, DEP_TX, DEP_PHOTO = range(3)
-WITHDRAW_AMOUNT, WITHDRAW_ADDRESS = range(3, 5)
-
-# =========================================================
-# WEB SERVER PARA RENDER
-# =========================================================
-
+# --- SERVIDOR WEB PARA CUMPLIR CON EL PUERTO DE RENDER ---
 async def handle_web(request):
-    return web.Response(text="Bot de Inversión activo y en línea.")
+    return web.Response(text="Bot de Rifa Activo y en Línea 24/7!")
 
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle_web)
-
     runner = web.AppRunner(app)
     await runner.setup()
-
-    port = int(os.environ.get("PORT", "10000"))
+    
+    port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-
     print(f"🌐 Servidor web corriendo en el puerto {port}")
+# ---------------------------------------------------------
 
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+ADMIN_TELEGRAM_ID = int(os.environ.get("ADMIN_TELEGRAM_ID", "0"))
 
-# =========================================================
-# BASE DE DATOS
-# =========================================================
+DB_FILE = "rifa_db.json"
 
-def db():
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    return conn
+def inicializar_rifa():
+    try:
+        if not os.path.exists(DB_FILE):
+            data_inicial = {
+                "estado_rifa": "activa",
+                "numeros": {str(i): {"estado": "disponible", "nombre": "", "user_id": "", "username": ""} for i in range(1, 101)},
+                "solicitudes_pendientes": {}
+            }
+            with open(DB_FILE, "w") as f:
+                json.dump(data_inicial, f, indent=4)
+    except Exception as e:
+        print(f"Error al inicializar JSON: {e}")
 
+def borrar_y_recrear_base_datos():
+    try:
+        if os.path.exists(DB_FILE):
+            os.remove(DB_FILE)
+    except Exception as e:
+        print(f"Error al eliminar archivo: {e}")
+    inicializar_rifa()
 
-def now_iso():
-    return datetime.now(timezone.utc).isoformat()
+def obtener_data_completa():
+    inicializar_rifa()
+    try:
+        with open(DB_FILE, "r") as f:
+            data = json.load(f)
+            if "estado_rifa" not in data:
+                data["estado_rifa"] = "activa"
+            if "solicitudes_pendientes" not in data:
+                data["solicitudes_pendientes"] = {}
+            return data
+    except Exception as e:
+        borrar_y_recrear_base_datos()
+        with open(DB_FILE, "r") as f:
+            return json.load(f)
 
+def guardar_data_completa(data):
+    try:
+        with open(DB_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Error al guardar JSON: {e}")
 
-def init_db():
-    conn = db()
-    cur = conn.cursor()
+def generar_texto_lista():
+    data = obtener_data_completa()
+    rifa = data["numeros"]
+    texto = "🎟️ *LISTA OFICIAL DE LA RIFA (1 al 100)* 🎟️\n\n"
+    disponibles = 0
+    for i in range(1, 101):
+        num_str = str(i).zfill(2)
+        info = rifa[str(i)]
+        estado = info.get("estado", "disponible")
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id INTEGER UNIQUE NOT NULL,
-            nombre TEXT NOT NULL DEFAULT '',
-            username TEXT NOT NULL DEFAULT '',
-            saldo REAL NOT NULL DEFAULT 0,
-            invertido REAL NOT NULL DEFAULT 0,
-            ganancias REAL NOT NULL DEFAULT 0,
-            total_depositado REAL NOT NULL DEFAULT 0,
-            total_retirado REAL NOT NULL DEFAULT 0,
-            codigo_referido TEXT UNIQUE,
-            referido_por TEXT,
-            fecha_registro TEXT NOT NULL
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS depositos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id INTEGER NOT NULL,
-            monto REAL NOT NULL,
-            tx_hash TEXT NOT NULL DEFAULT '',
-            foto_file_id TEXT NOT NULL DEFAULT '',
-            estado TEXT NOT NULL DEFAULT 'pendiente',
-            fecha TEXT NOT NULL,
-            fecha_revision TEXT,
-            revisado_por INTEGER
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS retiros (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id INTEGER NOT NULL,
-            monto REAL NOT NULL,
-            direccion TEXT NOT NULL,
-            estado TEXT NOT NULL DEFAULT 'pendiente',
-            fecha TEXT NOT NULL,
-            fecha_revision TEXT,
-            revisado_por INTEGER
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS inversiones (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id INTEGER NOT NULL,
-            plan TEXT NOT NULL,
-            capital REAL NOT NULL,
-            ganancia_acumulada REAL NOT NULL DEFAULT 0,
-            tasa_diaria REAL NOT NULL,
-            multiplicador_objetivo REAL NOT NULL,
-            estado TEXT NOT NULL DEFAULT 'activa',
-            fecha_inicio TEXT NOT NULL,
-            ultimo_calculo TEXT NOT NULL
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS movimientos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id INTEGER NOT NULL,
-            tipo TEXT NOT NULL,
-            monto REAL NOT NULL DEFAULT 0,
-            descripcion TEXT NOT NULL DEFAULT '',
-            fecha TEXT NOT NULL
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS referidos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            referido_id INTEGER NOT NULL,
-            referidor_id INTEGER NOT NULL,
-            nivel INTEGER NOT NULL DEFAULT 1,
-            bono REAL NOT NULL DEFAULT 0,
-            fecha TEXT NOT NULL,
-            UNIQUE(referido_id, referidor_id)
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-
-# =========================================================
-# UTILIDADES
-# =========================================================
-
-def money(value):
-    return f"{float(value):,.2f}"
-
-
-def is_admin(user_id):
-    return ADMIN_TELEGRAM_ID != 0 and user_id == ADMIN_TELEGRAM_ID
-
-
-def private_only(update):
-    chat = update.effective_chat
-    return chat is not None and chat.type == ChatType.PRIVATE
-
-
-def generate_ref_code(telegram_id):
-    return f"ref{telegram_id}"
-
-
-def get_bot_username(context):
-    return context.application.bot_data.get("bot_username", "")
-
-
-def get_user(telegram_id):
-    conn = db()
-    row = conn.execute(
-        "SELECT * FROM usuarios WHERE telegram_id = ?",
-        (telegram_id,)
-    ).fetchone()
-    conn.close()
-    return row
-
-
-def ensure_user(user, start_ref=None):
-    conn = db()
-    existing = conn.execute(
-        "SELECT * FROM usuarios WHERE telegram_id = ?",
-        (user.id,)
-    ).fetchone()
-
-    if existing:
-        conn.execute("""
-            UPDATE usuarios
-            SET nombre = ?, username = ?
-            WHERE telegram_id = ?
-        """, (
-            user.full_name or "",
-            user.username or "",
-            user.id
-        ))
-        conn.commit()
-        conn.close()
-        return
-
-    referido_por = None
-    if start_ref:
-        candidate = start_ref.strip()
-        referrer = conn.execute(
-            "SELECT telegram_id FROM usuarios WHERE codigo_referido = ?",
-            (candidate,)
-        ).fetchone()
-
-        if referrer and int(referrer["telegram_id"]) != user.id:
-            referido_por = candidate
-
-    ref_code = generate_ref_code(user.id)
-
-    conn.execute("""
-        INSERT INTO usuarios (
-            telegram_id, nombre, username, codigo_referido,
-            referido_por, fecha_registro
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        user.id,
-        user.full_name or "",
-        user.username or "",
-        ref_code,
-        referido_por,
-        now_iso()
-    ))
-
-    if referido_por:
-        referrer = conn.execute(
-            "SELECT telegram_id FROM usuarios WHERE codigo_referido = ?",
-            (referido_por,)
-        ).fetchone()
-
-        if referrer:
-            conn.execute("""
-                INSERT OR IGNORE INTO referidos (
-                    referido_id, referidor_id, nivel, bono, fecha
-                )
-                VALUES (?, ?, 1, 0, ?)
-            """, (
-                user.id,
-                referrer["telegram_id"],
-                now_iso()
-            ))
-
-    conn.commit()
-    conn.close()
-
-
-def add_movement(telegram_id, tipo, amount, description):
-    conn = db()
-    conn.execute("""
-        INSERT INTO movimientos (
-            telegram_id, tipo, monto, descripcion, fecha
-        )
-        VALUES (?, ?, ?, ?, ?)
-    """, (
-        telegram_id, tipo, amount, description, now_iso()
-    ))
-    conn.commit()
-    conn.close()
-
-
-def user_balance(telegram_id):
-    row = get_user(telegram_id)
-    if not row:
-        return 0.0
-    return float(row["saldo"])
-
-
-# =========================================================
-# MENÚS
-# =========================================================
-
-def user_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("👤 Mi cuenta", callback_data="user_account"),
-            InlineKeyboardButton("📈 Inversiones", callback_data="user_invest"),
-        ],
-        [
-            InlineKeyboardButton("💰 Depositar", callback_data="user_deposit"),
-            InlineKeyboardButton("💸 Retirar", callback_data="user_withdraw"),
-        ],
-        [
-            InlineKeyboardButton("🤝 Referidos", callback_data="user_referrals"),
-            InlineKeyboardButton("📜 Historial", callback_data="user_history"),
-        ],
-        [
-            InlineKeyboardButton("ℹ️ Información", callback_data="user_info"),
-        ],
-    ])
-
-
-def admin_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("👥 Usuarios", callback_data="admin_users"),
-            InlineKeyboardButton("📥 Depósitos", callback_data="admin_deposits"),
-        ],
-        [
-            InlineKeyboardButton("📤 Retiros", callback_data="admin_withdrawals"),
-            InlineKeyboardButton("📈 Inversiones", callback_data="admin_investments"),
-        ],
-        [
-            InlineKeyboardButton("💾 Crear respaldo", callback_data="admin_backup"),
-            InlineKeyboardButton("📊 Estado", callback_data="admin_status"),
-        ],
-        [
-            InlineKeyboardButton("⚙️ Procesar ganancias", callback_data="admin_profit"),
-        ],
-        [
-            InlineKeyboardButton("👤 Menú usuario", callback_data="admin_user_menu"),
-        ],
-    ])
-
-
-async def send_user_menu(chat_id, context, text=None):
-    if text is None:
-        text = (
-            "🏦 *MENÚ PRINCIPAL*\n\n"
-            "Selecciona una opción:"
-        )
-
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        reply_markup=user_keyboard(),
-        parse_mode="Markdown"
-    )
-
-
-async def send_admin_menu(chat_id, context, text=None):
-    if text is None:
-        text = (
-            "👑 *PANEL DE ADMINISTRACIÓN*\n\n"
-            "Selecciona una opción:"
-        )
-
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        reply_markup=admin_keyboard(),
-        parse_mode="Markdown"
-    )
-
-
-# =========================================================
-# /START
-# =========================================================
+        if estado == "disponible":
+            texto += f"🟢 *{num_str}*: Disponible\n"
+            disponibles += 1
+        elif estado == "pendiente":
+            texto += f"🟡 *{num_str}*: En verificación de pago...\n"
+        else:
+            nombre = info.get("nombre", "Usuario")
+            user_id = info.get("user_id")
+            if user_id:
+                texto += f"🔴 *{num_str}*: Ocupado por [{nombre}](tg://user?id={user_id})\n"
+            else:
+                texto += f"🔴 *{num_str}*: Ocupado por {nombre}\n"
+            
+    texto += f"\n📊 *Resumen:* Quedan {disponibles} números disponibles."
+    if data.get("estado_rifa") == "finalizada":
+        texto += "\n\n🔒 *ESTADO:* Rifa cerrada/finalizada."
+    return texto
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not private_only(update):
-        return
-
     user = update.effective_user
+    nombre = user.first_name or "Participante"
+    data_rifa = obtener_data_completa()
+    estado_actual_rifa = data_rifa.get("estado_rifa", "activa")
 
-    start_ref = None
-    if context.args:
-        start_ref = context.args[0]
+    respuesta = (
+        f"¡Hola {nombre}! Estado actual de la Rifa. ✨\n\n"
+        f"{generar_texto_lista()}"
+    )
+    if estado_actual_rifa == "activa":
+        respuesta += "\n\n👉 *¿Cómo comprar?* Envía los números que deseas separados por coma (ej: *7, 14*) aquí o en el grupo."
+    
+    await update.message.reply_text(respuesta, parse_mode="Markdown")
 
-    ensure_user(user, start_ref)
-
-    if is_admin(user.id):
-        await send_admin_menu(
-            user.id,
-            context,
-            "👑 *PANEL DE ADMINISTRACIÓN*\n\n"
-            "También puedes entrar al menú normal con el botón correspondiente."
-        )
-    else:
-        await send_user_menu(
-            user.id,
-            context,
-            f"👋 *Bienvenido, {user.first_name or 'usuario'}*\n\n"
-            "Desde aquí puedes administrar tu cuenta, depositar, "
-            "solicitar retiros, consultar inversiones y compartir tu enlace de referido."
-        )
-
-
-# =========================================================
-# /ADMIN
-# =========================================================
-
-async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not private_only(update):
-        return
-
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    if user.id != ADMIN_TELEGRAM_ID:
+        await update.message.reply_text("⛔ No estás autorizado para resetear la rifa.")
+        return
+    
+    borrar_y_recrear_base_datos()
+    await update.message.reply_text("🔄 *¡La rifa ha sido reseteada con éxito!* Todos los números vuelven a estar disponibles.\n\n" + generar_texto_lista(), parse_mode="Markdown")
 
-    if not is_admin(user.id):
-        await update.message.reply_text("⛔ No autorizado.")
+async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_TELEGRAM_ID:
+        await update.message.reply_text("⛔ No estás autorizado para dar el resultado ganador.")
         return
 
-    await send_admin_menu(user.id, context)
-
-
-# =========================================================
-# CUENTA
-# =========================================================
-
-async def show_account(query):
-    user_id = query.from_user.id
-    row = get_user(user_id)
-
-    if not row:
-        return await query.edit_message_text(
-            "⚠️ No se encontró tu cuenta. Usa /start."
-        )
-
-    texto = (
-        "👤 *MI CUENTA*\n\n"
-        f"🆔 ID: `{row['telegram_id']}`\n"
-        f"👤 Nombre: {row['nombre'] or '-'}\n"
-        f"💰 Saldo disponible: *{money(row['saldo'])} USDT*\n"
-        f"📈 Capital invertido: *{money(row['invertido'])} USDT*\n"
-        f"💵 Ganancias acumuladas: *{money(row['ganancias'])} USDT*\n"
-        f"📥 Total depositado: *{money(row['total_depositado'])} USDT*\n"
-        f"📤 Total retirado: *{money(row['total_retirado'])} USDT*\n"
-    )
-
-    await query.edit_message_text(
-        texto,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ Volver", callback_data="user_home")]
-        ])
-    )
-
-
-# =========================================================
-# REFERIDOS
-# =========================================================
-
-async def show_referrals(query, context):
-    user_id = query.from_user.id
-    row = get_user(user_id)
-
-    if not row:
+    if not context.args:
+        await update.message.reply_text("⚠️ Por favor indica el número ganador. Ejemplo: `/ganador 14`", parse_mode="Markdown")
         return
 
-    username = get_bot_username(context)
-    ref_code = row["codigo_referido"] or generate_ref_code(user_id)
-
-    link = f"https://t.me/{username}?start={ref_code}" if username else (
-        f"Abre el bot y usa tu código: {ref_code}"
-    )
-
-    conn = db()
-    count = conn.execute(
-        "SELECT COUNT(*) AS c FROM referidos WHERE referidor_id = ?",
-        (user_id,)
-    ).fetchone()["c"]
-
-    bonus = conn.execute(
-        "SELECT COALESCE(SUM(bono), 0) AS total "
-        "FROM referidos WHERE referidor_id = ?",
-        (user_id,)
-    ).fetchone()["total"]
-    conn.close()
-
-    share_text = (
-        "Únete a este bot para conocer el sistema de inversión:\n\n"
-        f"{link}"
-    )
-
-    share_url = (
-        "https://t.me/share/url?"
-        f"url={link.replace(' ', '%20')}"
-        f"&text={share_text.replace(' ', '%20')}"
-    )
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 Compartir mi enlace", url=share_url)],
-        [InlineKeyboardButton("⬅️ Volver", callback_data="user_home")],
-    ])
-
-    texto = (
-        "🤝 *PROGRAMA DE REFERIDOS*\n\n"
-        "Tu enlace personal:\n"
-        f"`{link}`\n\n"
-        f"👥 Personas registradas: *{count}*\n"
-        f"🎁 Bonos acumulados: *{money(bonus)} USDT*\n\n"
-        "Comparte el enlace para que otros puedan registrarse usando tu referencia."
-    )
-
-    await query.edit_message_text(
-        texto,
-        parse_mode="Markdown",
-        reply_markup=keyboard
-    )
-
-
-# =========================================================
-# INFORMACIÓN
-# =========================================================
-
-async def show_info(query):
-    texto = (
-        "ℹ️ *INFORMACIÓN DEL SISTEMA*\n\n"
-        f"📌 Plan disponible: *{PLAN_NAME}*\n"
-        f"📊 Tasa configurada: *{DAILY_RATE * 100:.4g}% diaria*\n"
-        f"🎯 Multiplicador máximo configurado: *{TARGET_MULTIPLIER:.2f}x*\n"
-        f"💵 Inversión mínima: *{money(MIN_INVESTMENT)} USDT*\n\n"
-        "⚠️ Los parámetros anteriores son configuraciones del sistema y "
-        "no constituyen una garantía de rentabilidad.\n\n"
-        "🌐 Red de depósitos: *TRC20*\n"
-        "📥 Los depósitos son revisados manualmente por el administrador.\n"
-        "📤 Los retiros también son revisados manualmente."
-    )
-
-    await query.edit_message_text(
-        texto,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ Volver", callback_data="user_home")]
-        ])
-    )
-
-
-# =========================================================
-# INVERSIONES
-# =========================================================
-
-def investment_summary(telegram_id):
-    conn = db()
-    rows = conn.execute("""
-        SELECT *
-        FROM inversiones
-        WHERE telegram_id = ?
-        ORDER BY id DESC
-    """, (telegram_id,)).fetchall()
-    conn.close()
-    return rows
-
-
-async def show_investments(query):
-    user_id = query.from_user.id
-    rows = investment_summary(user_id)
-
-    if not rows:
-        texto = (
-            "📈 *INVERSIONES*\n\n"
-            "No tienes inversiones activas todavía.\n\n"
-            f"Plan: *{PLAN_NAME}*\n"
-            f"Mínimo: *{money(MIN_INVESTMENT)} USDT*\n"
-            f"Tasa configurada: *{DAILY_RATE * 100:.4g}% diaria*\n\n"
-            "Puedes depositar saldo y después seleccionar invertir."
-        )
-    else:
-        lines = ["📈 *MIS INVERSIONES*\n"]
-
-        for inv in rows:
-            lines.append(
-                f"#{inv['id']} — {inv['plan']}\n"
-                f"Capital: {money(inv['capital'])} USDT\n"
-                f"Ganancia: {money(inv['ganancia_acumulada'])} USDT\n"
-                f"Estado: {inv['estado']}\n"
-            )
-
-        texto = "\n".join(lines)
-
-    keyboard = [
-        [InlineKeyboardButton(
-            "🚀 Invertir saldo",
-            callback_data="user_new_investment"
-        )],
-        [InlineKeyboardButton("⬅️ Volver", callback_data="user_home")]
-    ]
-
-    await query.edit_message_text(
-        texto,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-async def create_investment(query):
-    user_id = query.from_user.id
-    row = get_user(user_id)
-
-    if not row:
+    num_ingresado = context.args[0].strip()
+    if not num_ingresado.isdigit() or not (1 <= int(num_ingresado) <= 100):
+        await update.message.reply_text("⚠️ El número debe estar entre 1 y 100.", parse_mode="Markdown")
         return
 
-    balance = float(row["saldo"])
+    num_str = str(int(num_ingresado))
+    data_rifa = obtener_data_completa()
+    info_num = data_rifa["numeros"].get(num_str, {})
 
-    if balance < MIN_INVESTMENT:
-        await query.edit_message_text(
-            "⚠️ *SALDO INSUFICIENTE*\n\n"
-            f"Saldo disponible: {money(balance)} USDT\n"
-            f"Mínimo para invertir: {money(MIN_INVESTMENT)} USDT\n\n"
-            "Primero realiza un depósito y espera su aprobación.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💰 Depositar", callback_data="user_deposit")],
-                [InlineKeyboardButton("⬅️ Volver", callback_data="user_invest")]
-            ])
-        )
+    estado = info_num.get("estado")
+    if estado != "ocupado":
+        await update.message.reply_text(f"⚠️ El número *{num_ingresado.zfill(2)}* no está ocupado por ningún usuario (su estado es: *{estado}*).", parse_mode="Markdown")
         return
 
-    # Para evitar inversiones accidentales, mostramos confirmación.
-    await query.edit_message_text(
-        "🚀 *CONFIRMAR INVERSIÓN*\n\n"
-        f"Plan: *{PLAN_NAME}*\n"
-        f"Saldo disponible: *{money(balance)} USDT*\n"
-        f"Tasa configurada: *{DAILY_RATE * 100:.4g}% diaria*\n"
-        f"Objetivo configurado: *{TARGET_MULTIPLIER:.2f}x*\n\n"
-        "La inversión utilizará el saldo disponible completo.\n\n"
-        "⚠️ Estos son parámetros del sistema, no una garantía de resultado.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                "✅ Confirmar inversión",
-                callback_data="user_confirm_invest"
-            )],
-            [InlineKeyboardButton("❌ Cancelar", callback_data="user_invest")]
-        ])
+    ganador_nombre = info_num.get("nombre")
+    ganador_id = info_num.get("user_id")
+    num_formateado = num_str.zfill(2)
+    ganador_mencion = f"[{ganador_nombre}](tg://user?id={ganador_id})" if ganador_id else ganador_nombre
+
+    # 1. Anuncio en el grupo con la indicación del premio y captura de evidencia
+    msg_anuncio = (
+        f"🏆 *¡RESULTADO OFICIAL DE LA RIFA!* 🏆\n\n"
+        f"🎯 El Resultado de la Florida Pick 3 es el: *{num_formateado}*\n\n"
+        f"🎉 ¡El usuario {ganador_mencion} es el ganador de este número! Muchas felicidades. 🥳\n\n"
+        f"Por favor, póngase en contacto con el administrador @yordanisr para recibir su premio. "
+        f"Una vez que reciba la transferencia, le pedimos por favor que haga una captura de pantalla y la envíe a este grupo como evidencia de que recibió su pago y que todo funciona con total transparencia."
     )
+    await update.message.reply_text(msg_anuncio, parse_mode="Markdown")
 
-
-async def confirm_investment(query):
-    user_id = query.from_user.id
-    conn = db()
-
-    row = conn.execute(
-        "SELECT saldo FROM usuarios WHERE telegram_id = ?",
-        (user_id,)
-    ).fetchone()
-
-    if not row:
-        conn.close()
-        return
-
-    amount = float(row["saldo"])
-
-    if amount < MIN_INVESTMENT:
-        conn.close()
-        await query.answer(
-            "Saldo insuficiente.",
-            show_alert=True
-        )
-        return
-
-    if amount > MAX_INVESTMENT:
-        amount = MAX_INVESTMENT
-
-    conn.execute("""
-        UPDATE usuarios
-        SET saldo = saldo - ?, invertido = invertido + ?
-        WHERE telegram_id = ?
-    """, (amount, amount, user_id))
-
-    conn.execute("""
-        INSERT INTO inversiones (
-            telegram_id, plan, capital, ganancia_acumulada,
-            tasa_diaria, multiplicador_objetivo,
-            estado, fecha_inicio, ultimo_calculo
-        )
-        VALUES (?, ?, ?, 0, ?, ?, 'activa', ?, ?)
-    """, (
-        user_id,
-        PLAN_NAME,
-        amount,
-        DAILY_RATE,
-        TARGET_MULTIPLIER,
-        now_iso(),
-        now_iso()
-    ))
-
-    conn.commit()
-    conn.close()
-
-    add_movement(
-        user_id,
-        "inversion",
-        amount,
-        f"Inversión creada: {PLAN_NAME}"
-    )
-
-    await query.edit_message_text(
-        "✅ *INVERSIÓN CREADA*\n\n"
-        f"Plan: *{PLAN_NAME}*\n"
-        f"Capital: *{money(amount)} USDT*\n"
-        f"Tasa configurada: *{DAILY_RATE * 100:.4g}% diaria*\n\n"
-        "La inversión ya aparece en tu panel.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📈 Ver inversiones", callback_data="user_invest")],
-            [InlineKeyboardButton("🏠 Menú principal", callback_data="user_home")]
-        ])
-    )
-
-
-# =========================================================
-# GANANCIAS
-# =========================================================
-
-def process_profits():
-    """
-    Calcula ganancias acumuladas desde el último cálculo.
-    El proceso se ejecuta al presionar el botón administrativo.
-    """
-    conn = db()
-
-    rows = conn.execute("""
-        SELECT *
-        FROM inversiones
-        WHERE estado = 'activa'
-    """).fetchall()
-
-    processed = 0
-    total_profit = 0.0
-
-    now = datetime.now(timezone.utc)
-
-    for inv in rows:
+    # 2. Notificación en privado al ganador
+    if ganador_id:
         try:
-            last = datetime.fromisoformat(inv["ultimo_calculo"])
-        except Exception:
-            last = now
+            msg_privado = (
+                f"🎉 *¡FELICIDADES {ganador_nombre}!* 🎉\n\n"
+                f"¡Has ganado la rifa con tu número *{num_formateado}*! 🏆\n\n"
+                f"Por favor, ponte en contacto con el administrador @yordanisr para recibir tu premio. "
+                f"Una vez que recibas la transferencia, haz una captura de pantalla y envíala al grupo como evidencia de que todo funciona con transparencia. 🤝"
+            )
+            await context.bot.send_message(chat_id=ganador_id, text=msg_privado, parse_mode="Markdown")
+        except Exception as e:
+            print(f"⚠️ No se pudo enviar mensaje privado al ganador: {e}")
 
-        elapsed_seconds = max(0, (now - last).total_seconds())
-        days = elapsed_seconds / 86400.0
-
-        if days <= 0:
+async def bienvenida_nuevos_usuarios(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for nuevo_usuario in update.message.new_chat_members:
+        if nuevo_usuario.id == context.bot.id:
             continue
+        
+        nombre = nuevo_usuario.first_name or "Amigo"
+        mencion = f"[{nombre}](tg://user?id={nuevo_usuario.id})"
+        
+        texto_bienvenida = (
+            f"👋 ¡Bienvenido/a {mencion} al grupo de la Rifa! 🎟️\n\n"
+            f"Para participar y separar tus números:\n"
+            f"1️⃣ Revisa la lista enviando la palabra: `lista`.\n"
+            f"2️⃣ Envía por aquí los números que deseas separados por coma (ejemplo: *7, 14*).\n"
+            f"3️⃣ Sigue las instrucciones para validar tu pago.\n\n"
+            f"🎲 *¿Cómo se elige el ganador?*\n"
+            f"Una vez que se ocupen los 100 números de la lista, el número ganador se escogerá del resultado de la **Florida del Pick 3** al día siguiente en la noche. ¡Mucha suerte! 🍀"
+        )
+        
+        try:
+            await update.message.reply_text(texto_bienvenida, parse_mode="Markdown")
+        except Exception as e:
+            print(f"Error enviando bienvenida: {e}")
 
-        capital = float(inv["capital"])
-        accumulated = float(inv["ganancia_acumulada"])
-        target_profit = capital * (float(inv["multiplicador_objetivo"]) - 1)
+async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
 
-        available_target = max(0.0, target_profit - accumulated)
+    mensaje_texto = update.message.text.strip()
+    comando = mensaje_texto.lower()
+    user = update.effective_user
+    user_id = user.id
+    nombre_usuario = user.first_name or "Usuario"
+    chat_id = update.effective_chat.id
 
-        if available_target <= 0:
-            conn.execute("""
-                UPDATE inversiones
-                SET estado = 'completada', ultimo_calculo = ?
-                WHERE id = ?
-            """, (now.isoformat(), inv["id"]))
-            continue
+    data_rifa = obtener_data_completa()
+    rifa = data_rifa["numeros"]
+    solicitudes = data_rifa.get("solicitudes_pendientes", {})
+    estado_actual_rifa = data_rifa.get("estado_rifa", "activa")
 
-        profit = capital * float(inv["tasa_diaria"]) * days
-        profit = min(profit, available_target)
-
-        if profit <= 0:
-            continue
-
-        conn.execute("""
-            UPDATE inversiones
-            SET ganancia_acumulada = ganancia_acumulada + ?,
-                ultimo_calculo = ?
-            WHERE id = ?
-        """, (profit, now.isoformat(), inv["id"]))
-
-        conn.execute("""
-            UPDATE usuarios
-            SET ganancias = ganancias + ?,
-                saldo = saldo + ?
-            WHERE telegram_id = ?
-        """, (profit, profit, inv["telegram_id"]))
-
-        conn.execute("""
-            INSERT INTO movimientos (
-                telegram_id, tipo, monto, descripcion, fecha
-            )
-            VALUES (?, 'ganancia', ?, ?, ?)
-        """, (
-            inv["telegram_id"],
-            profit,
-            f"Ganancia procesada: inversión #{inv['id']}",
-            now.isoformat()
-        ))
-
-        new_total = accumulated + profit
-        if new_total >= target_profit:
-            conn.execute("""
-                UPDATE inversiones
-                SET estado = 'completada'
-                WHERE id = ?
-            """, (inv["id"],))
-
-        processed += 1
-        total_profit += profit
-
-    conn.commit()
-    conn.close()
-
-    return processed, total_profit
-
-
-# =========================================================
-# DEPÓSITOS
-# =========================================================
-
-async def start_deposit(update, context):
-    if not private_only(update):
-        return ConversationHandler.END
-
-    context.user_data.clear()
-    await update.message.reply_text(
-        "💰 *NUEVO DEPÓSITO*\n\n"
-        f"Red: *TRC20*\n"
-        f"Wallet:\n`{USDT_TRC20_ADDRESS or 'NO CONFIGURADA'}`\n\n"
-        "Envía ahora el monto que vas a depositar en USDT.",
-        parse_mode="Markdown"
-    )
-    return DEP_AMOUNT
-
-
-async def receive_deposit_amount(update, context):
-    if not private_only(update):
-        return ConversationHandler.END
-
-    try:
-        amount = float(update.message.text.replace(",", ".").strip())
-    except ValueError:
-        await update.message.reply_text("⚠️ Introduce solamente un número.")
-        return DEP_AMOUNT
-
-    if amount <= 0:
-        await update.message.reply_text("⚠️ El monto debe ser mayor que 0.")
-        return DEP_AMOUNT
-
-    context.user_data["deposit_amount"] = amount
-
-    await update.message.reply_text(
-        "🔗 Ahora envía el *hash de la transacción (TXID)*.",
-        parse_mode="Markdown"
-    )
-    return DEP_TX
-
-
-async def receive_deposit_tx(update, context):
-    if not private_only(update):
-        return ConversationHandler.END
-
-    tx = update.message.text.strip()
-
-    if len(tx) < 5:
+    if comando in ["hola", "buenas", "lista", "inicio", "rifa"]:
         await update.message.reply_text(
-            "⚠️ El TXID parece demasiado corto. Envíalo nuevamente."
+            f"¡Hola {nombre_usuario}! Estado actual de la Rifa:\n\n{generar_texto_lista()}",
+            parse_mode="Markdown"
         )
-        return DEP_TX
+        return
 
-    context.user_data["deposit_tx"] = tx
+    partes = [p.strip() for p in mensaje_texto.split(",")]
+    es_lista_numeros = all(p.isdigit() for p in partes) if partes else False
 
-    await update.message.reply_text(
-        "📸 Ahora envía una *captura del comprobante* del depósito.\n\n"
-        "Si no puedes enviar captura, escribe /skip.",
-        parse_mode="Markdown"
-    )
-    return DEP_PHOTO
+    if es_lista_numeros:
+        if estado_actual_rifa == "finalizada":
+            await update.message.reply_text("🔒 *Lo sentimos, el sistema está cerrado.*", parse_mode="Markdown")
+            return
 
+        ocupados, pendientes, validos_para_reservar, invalidos = [], [], [], []
 
-async def receive_deposit_photo(update, context):
-    if not private_only(update):
-        return ConversationHandler.END
+        for p in partes:
+            num_elegido = int(p)
+            if 1 <= num_elegido <= 100:
+                num_str = str(num_elegido)
+                info = rifa[num_str]
+                est = info.get("estado", "disponible")
 
-    photo = update.message.photo[-1]
-    context.user_data["deposit_photo"] = photo.file_id
+                if est == "ocupado":
+                    ocupados.append(f"*{num_str.zfill(2)}*")
+                elif est == "pendiente":
+                    pendientes.append(f"*{num_str.zfill(2)}*")
+                else:
+                    validos_para_reservar.append(num_str)
+            else:
+                invalidos.append(p)
 
-    return await finish_deposit(update, context)
+        mensajes_conflicto = []
+        if ocupados:
+            mensajes_conflicto.append(f"🔴 El/los número(s) {', '.join(ocupados)} ya está(n) *OCUPADO(S)*.")
+        if pendientes:
+            mensajes_conflicto.append(f"🟡 El/los número(s) {', '.join(pendientes)} está(n) *EN PROCESO DE VERIFICACIÓN*.")
+        if invalidos:
+            mensajes_conflicto.append(f"⚠️ El/los número(s) {', '.join(invalidos)} está(n) fuera del rango (1 al 100).")
 
+        if mensajes_conflicto and not validos_para_reservar:
+            await update.message.reply_text(f"Hola {nombre_usuario}:\n" + "\n".join(mensajes_conflicto), parse_mode="Markdown")
+            return
 
-async def skip_deposit_photo(update, context):
-    if not private_only(update):
-        return ConversationHandler.END
+        if validos_para_reservar:
+            req_id = "r" + str(uuid.uuid4().int)[:4]
 
-    context.user_data["deposit_photo"] = ""
-    return await finish_deposit(update, context)
+            for n in validos_para_reservar:
+                rifa[n]["estado"] = "pendiente"
 
+            solicitudes[req_id] = {
+                "nombre": nombre_usuario,
+                "user_id": user_id,
+                "username": user.username or "",
+                "numeros": validos_para_reservar,
+                "chat_origen": chat_id
+            }
 
-async def finish_deposit(update, context):
-    user_id = update.effective_user.id
-    amount = float(context.user_data.get("deposit_amount", 0))
-    tx = context.user_data.get("deposit_tx", "")
-    photo_id = context.user_data.get("deposit_photo", "")
+            data_rifa["numeros"] = rifa
+            data_rifa["solicitudes_pendientes"] = solicitudes
+            guardar_data_completa(data_rifa)
 
-    conn = db()
-    cur = conn.execute("""
-        INSERT INTO depositos (
-            telegram_id, monto, tx_hash, foto_file_id,
-            estado, fecha
-        )
-        VALUES (?, ?, ?, ?, 'pendiente', ?)
-    """, (
-        user_id,
-        amount,
-        tx,
-        photo_id,
-        now_iso()
-    ))
-    deposit_id = cur.lastrowid
-    conn.commit()
-    conn.close()
+            nums_solicitados_txt = ", ".join([n.zfill(2) for n in validos_para_reservar])
 
-    add_movement(
-        user_id,
-        "deposito_pendiente",
-        amount,
-        f"Depósito #{deposit_id} enviado para revisión"
-    )
-
-    await update.message.reply_text(
-        "⏳ *DEPÓSITO ENVIADO*\n\n"
-        f"ID: `{deposit_id}`\n"
-        f"Monto: *{money(amount)} USDT*\n"
-        f"TXID: `{tx}`\n\n"
-        "El administrador revisará el depósito manualmente.",
-        parse_mode="Markdown"
-    )
-
-    admin_text = (
-        "📥 *NUEVO DEPÓSITO PENDIENTE*\n\n"
-        f"ID: `{deposit_id}`\n"
-        f"Usuario: `{user_id}`\n"
-        f"Nombre: {update.effective_user.full_name}\n"
-        f"Monto: *{money(amount)} USDT*\n"
-        f"TXID: `{tx}`"
-    )
-
-    admin_keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "✅ Aprobar",
-                callback_data=f"dep_approve_{deposit_id}"
-            ),
-            InlineKeyboardButton(
-                "❌ Rechazar",
-                callback_data=f"dep_reject_{deposit_id}"
-            )
-        ]
-    ])
-
-    try:
-        await context.bot.send_message(
-            chat_id=ADMIN_TELEGRAM_ID,
-            text=admin_text,
-            parse_mode="Markdown",
-            reply_markup=admin_keyboard
-        )
-
-        if photo_id:
-            await context.bot.send_photo(
-                chat_id=ADMIN_TELEGRAM_ID,
-                photo=photo_id,
-                caption=f"📸 Comprobante del depósito #{deposit_id}"
-            )
-    except Exception as e:
-        print(f"Error notificando depósito al admin: {e}")
-
-    context.user_data.clear()
-    return ConversationHandler.END
-
-
-async def cancel_deposit(update, context):
-    context.user_data.clear()
-    await update.message.reply_text("❌ Depósito cancelado.")
-    return ConversationHandler.END
-
-
-# =========================================================
-# RETIROS
-# =========================================================
-
-async def start_withdraw(update, context):
-    if not private_only(update):
-        return ConversationHandler.END
-
-    row = get_user(update.effective_user.id)
-    balance = float(row["saldo"]) if row else 0
-
-    await update.message.reply_text(
-        "💸 *SOLICITAR RETIRO*\n\n"
-        f"Saldo disponible: *{money(balance)} USDT*\n\n"
-        "Introduce el monto que deseas retirar.",
-        parse_mode="Markdown"
-    )
-
-    context.user_data.clear()
-    return WITHDRAW_AMOUNT
-
-
-async def receive_withdraw_amount(update, context):
-    if not private_only(update):
-        return ConversationHandler.END
-
-    try:
-        amount = float(update.message.text.replace(",", ".").strip())
-    except ValueError:
-        await update.message.reply_text("⚠️ Introduce un monto válido.")
-        return WITHDRAW_AMOUNT
-
-    if amount <= 0:
-        await update.message.reply_text("⚠️ El monto debe ser mayor que 0.")
-        return WITHDRAW_AMOUNT
-
-    balance = user_balance(update.effective_user.id)
-
-    if amount > balance:
-        await update.message.reply_text(
-            f"⚠️ Saldo insuficiente.\nDisponible: {money(balance)} USDT"
-        )
-        return WITHDRAW_AMOUNT
-
-    context.user_data["withdraw_amount"] = amount
-
-    await update.message.reply_text(
-        "📍 Envía ahora tu dirección *USDT TRC20*.",
-        parse_mode="Markdown"
-    )
-    return WITHDRAW_ADDRESS
-
-
-async def receive_withdraw_address(update, context):
-    if not private_only(update):
-        return ConversationHandler.END
-
-    address = update.message.text.strip()
-    amount = float(context.user_data.get("withdraw_amount", 0))
-    user_id = update.effective_user.id
-
-    if len(address) < 20:
-        await update.message.reply_text(
-            "⚠️ La dirección parece inválida. Envíala nuevamente."
-        )
-        return WITHDRAW_ADDRESS
-
-    conn = db()
-
-    row = conn.execute(
-        "SELECT saldo FROM usuarios WHERE telegram_id = ?",
-        (user_id,)
-    ).fetchone()
-
-    if not row or float(row["saldo"]) < amount:
-        conn.close()
-        await update.message.reply_text(
-            "⚠️ El saldo ya no es suficiente para esta solicitud."
-        )
-        return ConversationHandler.END
-
-    conn.execute("""
-        UPDATE usuarios
-        SET saldo = saldo - ?
-        WHERE telegram_id = ?
-    """, (amount, user_id))
-
-    cur = conn.execute("""
-        INSERT INTO retiros (
-            telegram_id, monto, direccion, estado, fecha
-        )
-        VALUES (?, ?, ?, 'pendiente', ?)
-    """, (
-        user_id,
-        amount,
-        address,
-        now_iso()
-    ))
-
-    withdrawal_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-
-    add_movement(
-        user_id,
-        "retiro_pendiente",
-        amount,
-        f"Retiro #{withdrawal_id} enviado para revisión"
-    )
-
-    await update.message.reply_text(
-        "⏳ *RETIRO SOLICITADO*\n\n"
-        f"ID: `{withdrawal_id}`\n"
-        f"Monto: *{money(amount)} USDT*\n"
-        f"Red: *TRC20*\n"
-        f"Dirección: `{address}`\n\n"
-        "El administrador revisará y procesará la solicitud.",
-        parse_mode="Markdown"
-    )
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "✅ Aprobar",
-                callback_data=f"wd_approve_{withdrawal_id}"
-            ),
-            InlineKeyboardButton(
-                "❌ Rechazar",
-                callback_data=f"wd_reject_{withdrawal_id}"
-            )
-        ]
-    ])
-
-    try:
-        await context.bot.send_message(
-            chat_id=ADMIN_TELEGRAM_ID,
-            text=(
-                "📤 *NUEVO RETIRO PENDIENTE*\n\n"
-                f"ID: `{withdrawal_id}`\n"
-                f"Usuario: `{user_id}`\n"
-                f"Monto: *{money(amount)} USDT*\n"
-                f"Dirección TRC20:\n`{address}`"
-            ),
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
-    except Exception as e:
-        print(f"Error notificando retiro al admin: {e}")
-
-    context.user_data.clear()
-    return ConversationHandler.END
-
-
-async def cancel_withdraw(update, context):
-    context.user_data.clear()
-    await update.message.reply_text("❌ Retiro cancelado.")
-    return ConversationHandler.END
-
-
-# =========================================================
-# HISTORIAL
-# =========================================================
-
-async def show_history(query):
-    user_id = query.from_user.id
-
-    conn = db()
-    rows = conn.execute("""
-        SELECT tipo, monto, descripcion, fecha
-        FROM movimientos
-        WHERE telegram_id = ?
-        ORDER BY id DESC
-        LIMIT 15
-    """, (user_id,)).fetchall()
-    conn.close()
-
-    if not rows:
-        texto = "📜 *HISTORIAL*\n\nTodavía no tienes movimientos."
-    else:
-        texto = "📜 *HISTORIAL*\n\n"
-
-        for r in rows:
-            texto += (
-                f"• {r['tipo']} — {money(r['monto'])} USDT\n"
-                f"  {r['descripcion']}\n\n"
+            await update.message.reply_text(
+                f"⏳ *SOLICITUD EN PROCESO* ⏳\n\n"
+                f"Hola {nombre_usuario}, tus números (*{nums_solicitados_txt}*) están *reservados temporalmente*.\n\n"
+                f"Por favor, póngase en contacto con el administrador @yordanisr para realizar la transferencia.",
+                parse_mode="Markdown"
             )
 
-    await query.edit_message_text(
-        texto,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ Volver", callback_data="user_home")]
-        ])
-    )
+            keyboard = [
+                [
+                    InlineKeyboardButton("🟢 Confirmar Pago", callback_data=f"conf_{req_id}"),
+                    InlineKeyboardButton("🔴 Rechazar Pago", callback_data=f"rech_{req_id}")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
 
+            txt_admin = (
+                f"📥 *NUEVA SOLICITUD DE COMPRA* (ID: `{req_id}`)\n\n"
+                f"👤 *Cliente:* {nombre_usuario}\n"
+                f"💬 *Username:* @{user.username if user.username else 'Sin alias'}\n"
+                f"🎟️ *Números:* *{nums_solicitados_txt}*\n\n"
+                f"¿Deseas confirmar el pago?"
+            )
 
-# =========================================================
-# CALLBACKS
-# =========================================================
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_TELEGRAM_ID,
+                    text=txt_admin,
+                    reply_markup=reply_markup,
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                print(f"Error enviando mensaje al admin: {e}")
 
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.message is None:
+    if query.from_user.id != ADMIN_TELEGRAM_ID:
+        await query.edit_message_text("⛔ No estás autorizado.")
         return
 
-    # TODO EL PANEL PRIVADO
-    if query.message.chat.type != ChatType.PRIVATE:
-        await query.answer(
-            "Este menú solo funciona en el chat privado con el bot.",
-            show_alert=True
-        )
+    data_callback = query.data
+    accion, req_id = data_callback.split("_", 1)
+
+    data_rifa = obtener_data_completa()
+    rifa = data_rifa["numeros"]
+    solicitudes = data_rifa.get("solicitudes_pendientes", {})
+
+    if req_id not in solicitudes:
+        await query.edit_message_text(f"⚠️ La solicitud `{req_id}` ya fue procesada o no existe.", parse_mode="Markdown")
         return
 
-    user_id = query.from_user.id
-    data = query.data or ""
+    sol = solicitudes[req_id]
+    user_nombre = sol["nombre"]
+    user_id = sol["user_id"]
+    user_nums = sol["numeros"]
+    chat_origen = sol["chat_origen"]
 
-    print(
-        f"[CALLBACK] user_id={user_id} "
-        f"chat_id={query.message.chat.id} data={data}"
-    )
+    nums_formatted = ", ".join([n.zfill(2) for n in user_nums])
+    usuario_mencion = f"[{user_nombre}](tg://user?id={user_id})"
 
-    # -----------------------------------------------------
-    # ADMIN
-    # -----------------------------------------------------
+    if accion == "conf":
+        for n in user_nums:
+            rifa[n]["estado"] = "ocupado"
+            rifa[n]["nombre"] = user_nombre
+            rifa[n]["user_id"] = user_id
 
-    if data.startswith("admin_") or data.startswith("dep_") or data.startswith("wd_"):
-        if not is_admin(user_id):
-            await query.answer(
-                "⛔ No autorizado.",
-                show_alert=True
-            )
-            return
+        del solicitudes[req_id]
+        data_rifa["numeros"] = rifa
+        data_rifa["solicitudes_pendientes"] = solicitudes
 
-    if data == "admin_users":
-        conn = db()
-        count = conn.execute(
-            "SELECT COUNT(*) AS c FROM usuarios"
-        ).fetchone()["c"]
-        total = conn.execute(
-            "SELECT COALESCE(SUM(total_depositado), 0) AS s FROM usuarios"
-        ).fetchone()["s"]
-        invested = conn.execute(
-            "SELECT COALESCE(SUM(invertido), 0) AS s FROM usuarios"
-        ).fetchone()["s"]
-        conn.close()
+        if all(rifa[str(n)]["estado"] == "ocupado" for n in range(1, 101)):
+            data_rifa["estado_rifa"] = "finalizada"
 
-        await query.edit_message_text(
-            "👥 *USUARIOS*\n\n"
-            f"Usuarios registrados: *{count}*\n"
-            f"Total depositado: *{money(total)} USDT*\n"
-            f"Capital actualmente invertido: *{money(invested)} USDT*",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Panel", callback_data="admin_home")]
-            ])
-        )
-        return
+        guardar_data_completa(data_rifa)
 
-    if data == "admin_deposits":
-        conn = db()
-        rows = conn.execute("""
-            SELECT *
-            FROM depositos
-            WHERE estado = 'pendiente'
-            ORDER BY id DESC
-            LIMIT 10
-        """).fetchall()
-        conn.close()
+        await query.edit_message_text(f"✅ *Solicitud {req_id} APROBADA.* Números: {nums_formatted}", parse_mode="Markdown")
 
-        if not rows:
-            text = "📥 *DEPÓSITOS PENDIENTES*\n\nNo hay depósitos pendientes."
-        else:
-            text = "📥 *DEPÓSITOS PENDIENTES*\n\n"
-            for r in rows:
-                text += (
-                    f"#{r['id']} — Usuario `{r['telegram_id']}`\n"
-                    f"Monto: *{money(r['monto'])} USDT*\n"
-                    f"TX: `{r['tx_hash']}`\n\n"
-                )
-
-        await query.edit_message_text(
-            text,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Panel", callback_data="admin_home")]
-            ])
-        )
-        return
-
-    if data == "admin_withdrawals":
-        conn = db()
-        rows = conn.execute("""
-            SELECT *
-            FROM retiros
-            WHERE estado = 'pendiente'
-            ORDER BY id DESC
-            LIMIT 10
-        """).fetchall()
-        conn.close()
-
-        if not rows:
-            text = "📤 *RETIROS PENDIENTES*\n\nNo hay retiros pendientes."
-        else:
-            text = "📤 *RETIROS PENDIENTES*\n\n"
-            for r in rows:
-                text += (
-                    f"#{r['id']} — Usuario `{r['telegram_id']}`\n"
-                    f"Monto: *{money(r['monto'])} USDT*\n"
-                    f"Dirección: `{r['direccion']}`\n\n"
-                )
-
-        await query.edit_message_text(
-            text,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Panel", callback_data="admin_home")]
-            ])
-        )
-        return
-
-    if data == "admin_investments":
-        conn = db()
-        active = conn.execute("""
-            SELECT COUNT(*) AS c
-            FROM inversiones
-            WHERE estado = 'activa'
-        """).fetchone()["c"]
-
-        capital = conn.execute("""
-            SELECT COALESCE(SUM(capital), 0) AS s
-            FROM inversiones
-            WHERE estado = 'activa'
-        """).fetchone()["s"]
-
-        profit = conn.execute("""
-            SELECT COALESCE(SUM(ganancia_acumulada), 0) AS s
-            FROM inversiones
-        """).fetchone()["s"]
-
-        conn.close()
-
-        await query.edit_message_text(
-            "📈 *INVERSIONES*\n\n"
-            f"Activas: *{active}*\n"
-            f"Capital activo: *{money(capital)} USDT*\n"
-            f"Ganancias acumuladas: *{money(profit)} USDT*",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Panel", callback_data="admin_home")]
-            ])
-        )
-        return
-
-    if data == "admin_status":
-        conn = db()
-        users = conn.execute(
-            "SELECT COUNT(*) AS c FROM usuarios"
-        ).fetchone()["c"]
-        deposits = conn.execute(
-            "SELECT COUNT(*) AS c FROM depositos WHERE estado='pendiente'"
-        ).fetchone()["c"]
-        withdrawals = conn.execute(
-            "SELECT COUNT(*) AS c FROM retiros WHERE estado='pendiente'"
-        ).fetchone()["c"]
-        investments = conn.execute(
-            "SELECT COUNT(*) AS c FROM inversiones WHERE estado='activa'"
-        ).fetchone()["c"]
-        conn.close()
-
-        await query.edit_message_text(
-            "📊 *ESTADO DEL SISTEMA*\n\n"
-            "🟢 Bot: activo\n"
-            f"👥 Usuarios: *{users}*\n"
-            f"📥 Depósitos pendientes: *{deposits}*\n"
-            f"📤 Retiros pendientes: *{withdrawals}*\n"
-            f"📈 Inversiones activas: *{investments}*\n"
-            f"💾 Base de datos: `{DB_FILE}`",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Panel", callback_data="admin_home")]
-            ])
-        )
-        return
-
-    if data == "admin_profit":
-        processed, total = process_profits()
-
-        await query.edit_message_text(
-            "⚙️ *GANANCIAS PROCESADAS*\n\n"
-            f"Inversiones procesadas: *{processed}*\n"
-            f"Ganancia acreditada: *{money(total)} USDT*",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Panel", callback_data="admin_home")]
-            ])
-        )
-        return
-
-    if data == "admin_backup":
-        await query.edit_message_text(
-            "💾 *PREPARANDO RESPALDO...*",
-            parse_mode="Markdown"
-        )
-
-        os.makedirs(BACKUP_DIR, exist_ok=True)
-        filename = (
-            f"database_backup_"
-            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-        )
-        path = os.path.join(BACKUP_DIR, filename)
-
+        # 1. Aviso en el grupo
         try:
-            conn = db()
-            backup_conn = sqlite3.connect(path)
-            conn.backup(backup_conn)
-            backup_conn.close()
-            conn.close()
-
-            with open(path, "rb") as f:
-                await context.bot.send_document(
-                    chat_id=ADMIN_TELEGRAM_ID,
-                    document=InputFile(f, filename=filename),
-                    caption="💾 Respaldo de la base de datos."
-                )
-
-            await query.edit_message_text(
-                "✅ *RESPALDO CREADO CORRECTAMENTE*\n\n"
-                f"Archivo: `{filename}`",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        "⬅️ Panel administrativo",
-                        callback_data="admin_home"
-                    )]
-                ])
-            )
-
+            msg_grupo = f"🎉 *¡PAGO CONFIRMADO!* 🎉\n\n👤 *Usuario:* {usuario_mencion}\n🎟️ *Números asignados:* *{nums_formatted}*\n\n¡Muchas felicidades! 🤝"
+            await context.bot.send_message(chat_id=chat_origen, text=msg_grupo, parse_mode="Markdown")
         except Exception as e:
-            print(f"Error backup: {e}")
-            await query.edit_message_text(
-                f"❌ *ERROR AL CREAR RESPALDO*\n\n`{str(e)}`",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        "⬅️ Panel",
-                        callback_data="admin_home"
-                    )]
-                ])
-            )
-        return
+            print(f"Error enviando aviso al grupo: {e}")
 
-    if data == "admin_user_menu":
-        await send_user_menu(
-            ADMIN_TELEGRAM_ID,
-            context,
-            "👤 *MENÚ DE USUARIO*\n\n"
-            "Estás viendo el menú normal como administrador."
-        )
-        return
-
-    if data == "admin_home":
-        await send_admin_menu(
-            ADMIN_TELEGRAM_ID,
-            context
-        )
-        return
-
-    # -----------------------------------------------------
-    # APROBAR/RECHAZAR DEPÓSITO
-    # -----------------------------------------------------
-
-    if data.startswith("dep_approve_"):
-        deposit_id = int(data.rsplit("_", 1)[1])
-
-        conn = db()
-        row = conn.execute(
-            "SELECT * FROM depositos WHERE id = ?",
-            (deposit_id,)
-        ).fetchone()
-
-        if not row or row["estado"] != "pendiente":
-            conn.close()
-            await query.answer(
-                "Este depósito ya fue procesado.",
-                show_alert=True
-            )
-            return
-
-        amount = float(row["monto"])
-        uid = row["telegram_id"]
-
-        conn.execute("""
-            UPDATE depositos
-            SET estado='aprobado', fecha_revision=?, revisado_por=?
-            WHERE id=?
-        """, (now_iso(), user_id, deposit_id))
-
-        conn.execute("""
-            UPDATE usuarios
-            SET saldo = saldo + ?,
-                total_depositado = total_depositado + ?
-            WHERE telegram_id = ?
-        """, (amount, amount, uid))
-
-        conn.commit()
-        conn.close()
-
-        add_movement(
-            uid,
-            "deposito",
-            amount,
-            f"Depósito #{deposit_id} aprobado"
-        )
-
-        await query.edit_message_text(
-            f"✅ *DEPÓSITO #{deposit_id} APROBADO*\n\n"
-            f"Monto acreditado: *{money(amount)} USDT*",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "⬅️ Panel",
-                    callback_data="admin_home"
-                )]
-            ])
-        )
-
+        # 2. Notificación en privado al usuario
         try:
-            await context.bot.send_message(
-                chat_id=uid,
-                text=(
-                    "✅ *DEPÓSITO APROBADO*\n\n"
-                    f"Tu depósito de *{money(amount)} USDT* "
-                    "fue aprobado y acreditado a tu saldo."
-                ),
-                parse_mode="Markdown"
-            )
+            msg_privado = f"✅ *¡PAGO APROBADO!* 🎉\n\nHola {user_nombre}, tu pago ha sido verificado. Tus números (*{nums_formatted}*) ya están registrados oficialmente a tu nombre.\n\n¡Mucha suerte en la rifa! 🍀"
+            await context.bot.send_message(chat_id=user_id, text=msg_privado, parse_mode="Markdown")
         except Exception as e:
-            print(f"Error notificando aprobación de depósito: {e}")
+            print(f"⚠️ No se pudo enviar privado de aprobación: {e}")
 
-        return
+    elif accion == "rech":
+        for n in user_nums:
+            rifa[n] = {"estado": "disponible", "nombre": "", "user_id": "", "username": ""}
 
-    if data.startswith("dep_reject_"):
-        deposit_id = int(data.rsplit("_", 1)[1])
+        del solicitudes[req_id]
+        data_rifa["numeros"] = rifa
+        data_rifa["solicitudes_pendientes"] = solicitudes
+        guardar_data_completa(data_rifa)
 
-        conn = db()
-        row = conn.execute(
-            "SELECT * FROM depositos WHERE id=?",
-            (deposit_id,)
-        ).fetchone()
+        await query.edit_message_text(f"❌ *Solicitud {req_id} RECHAZADA.*", parse_mode="Markdown")
 
-        if not row or row["estado"] != "pendiente":
-            conn.close()
-            await query.answer(
-                "Este depósito ya fue procesado.",
-                show_alert=True
-            )
-            return
-
-        conn.execute("""
-            UPDATE depositos
-            SET estado='rechazado', fecha_revision=?, revisado_por=?
-            WHERE id=?
-        """, (now_iso(), user_id, deposit_id))
-        conn.commit()
-        conn.close()
-
-        await query.edit_message_text(
-            f"❌ *DEPÓSITO #{deposit_id} RECHAZADO*",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "⬅️ Panel",
-                    callback_data="admin_home"
-                )]
-            ])
-        )
-
+        # 1. Aviso en el grupo
         try:
-            await context.bot.send_message(
-                chat_id=row["telegram_id"],
-                text=(
-                    "❌ *DEPÓSITO RECHAZADO*\n\n"
-                    f"El depósito #{deposit_id} fue rechazado. "
-                    "Contacta al administrador si necesitas revisar el caso."
-                ),
-                parse_mode="Markdown"
-            )
+            msg_cancel_grupo = f"⚠️ *SOLICITUD RECHAZADA* ⚠️\n\nEl pago de {usuario_mencion} para el/los número(s) *{nums_formatted}* no pudo ser verificado. Los números vuelven a estar 🟢 *Disponibles*."
+            await context.bot.send_message(chat_id=chat_origen, text=msg_cancel_grupo, parse_mode="Markdown")
         except Exception as e:
-            print(f"Error notificando rechazo: {e}")
+            print(f"Error notificando rechazo en grupo: {e}")
 
-        return
-
-    # -----------------------------------------------------
-    # APROBAR/RECHAZAR RETIRO
-    # -----------------------------------------------------
-
-    if data.startswith("wd_approve_"):
-        withdrawal_id = int(data.rsplit("_", 1)[1])
-
-        conn = db()
-        row = conn.execute(
-            "SELECT * FROM retiros WHERE id=?",
-            (withdrawal_id,)
-        ).fetchone()
-
-        if not row or row["estado"] != "pendiente":
-            conn.close()
-            await query.answer(
-                "Este retiro ya fue procesado.",
-                show_alert=True
-            )
-            return
-
-        conn.execute("""
-            UPDATE retiros
-            SET estado='aprobado', fecha_revision=?, revisado_por=?
-            WHERE id=?
-        """, (now_iso(), user_id, withdrawal_id))
-
-        conn.execute("""
-            UPDATE usuarios
-            SET total_retirado = total_retirado + ?
-            WHERE telegram_id=?
-        """, (row["monto"], row["telegram_id"]))
-
-        conn.commit()
-        conn.close()
-
-        add_movement(
-            row["telegram_id"],
-            "retiro",
-            row["monto"],
-            f"Retiro #{withdrawal_id} aprobado"
-        )
-
-        await query.edit_message_text(
-            f"✅ *RETIRO #{withdrawal_id} APROBADO*\n\n"
-            f"Monto: *{money(row['monto'])} USDT*\n\n"
-            "El administrador debe realizar el envío a la dirección indicada.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "⬅️ Panel",
-                    callback_data="admin_home"
-                )]
-            ])
-        )
-
+        # 2. Notificación en privado al usuario
         try:
-            await context.bot.send_message(
-                chat_id=row["telegram_id"],
-                text=(
-                    "✅ *RETIRO APROBADO*\n\n"
-                    f"Tu solicitud #{withdrawal_id} por "
-                    f"*{money(row['monto'])} USDT* fue aprobada.\n\n"
-                    "El envío será procesado por el administrador."
-                ),
-                parse_mode="Markdown"
-            )
+            msg_cancel_privado = f"❌ *SOLICITUD RECHAZADA* ❌\n\nHola {user_nombre}, lamentablemente tu pago para el/los número(s) *{nums_formatted}* fue rechazado y los números han sido liberados nuevamente."
+            await context.bot.send_message(chat_id=user_id, text=msg_cancel_privado, parse_mode="Markdown")
         except Exception as e:
-            print(f"Error notificando retiro aprobado: {e}")
-
-        return
-
-    if data.startswith("wd_reject_"):
-        withdrawal_id = int(data.rsplit("_", 1)[1])
-
-        conn = db()
-        row = conn.execute(
-            "SELECT * FROM retiros WHERE id=?",
-            (withdrawal_id,)
-        ).fetchone()
-
-        if not row or row["estado"] != "pendiente":
-            conn.close()
-            await query.answer(
-                "Este retiro ya fue procesado.",
-                show_alert=True
-            )
-            return
-
-        conn.execute("""
-            UPDATE retiros
-            SET estado='rechazado', fecha_revision=?, revisado_por=?
-            WHERE id=?
-        """, (now_iso(), user_id, withdrawal_id))
-
-        conn.execute("""
-            UPDATE usuarios
-            SET saldo = saldo + ?
-            WHERE telegram_id=?
-        """, (row["monto"], row["telegram_id"]))
-
-        conn.commit()
-        conn.close()
-
-        add_movement(
-            row["telegram_id"],
-            "devolucion_retiro",
-            row["monto"],
-            f"Retiro #{withdrawal_id} rechazado; saldo devuelto"
-        )
-
-        await query.edit_message_text(
-            f"❌ *RETIRO #{withdrawal_id} RECHAZADO*\n\n"
-            "El saldo fue devuelto al usuario.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "⬅️ Panel",
-                    callback_data="admin_home"
-                )]
-            ])
-        )
-
-        try:
-            await context.bot.send_message(
-                chat_id=row["telegram_id"],
-                text=(
-                    "❌ *RETIRO RECHAZADO*\n\n"
-                    f"El retiro #{withdrawal_id} fue rechazado y "
-                    f"{money(row['monto'])} USDT fueron devueltos a tu saldo."
-                ),
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            print(f"Error notificando retiro rechazado: {e}")
-
-        return
-
-    # -----------------------------------------------------
-    # USUARIO
-    # -----------------------------------------------------
-
-    if data == "user_home":
-        await send_user_menu(
-            user_id,
-            context,
-            "🏦 *MENÚ PRINCIPAL*\n\nSelecciona una opción:"
-        )
-        return
-
-    if data == "user_account":
-        await show_account(query)
-        return
-
-    if data == "user_invest":
-        await show_investments(query)
-        return
-
-    if data == "user_new_investment":
-        await create_investment(query)
-        return
-
-    if data == "user_confirm_invest":
-        await confirm_investment(query)
-        return
-
-    if data == "user_referrals":
-        await show_referrals(query, context)
-        return
-
-    if data == "user_history":
-        await show_history(query)
-        return
-
-    if data == "user_info":
-        await show_info(query)
-        return
-
-    if data == "user_deposit":
-        await query.edit_message_text(
-            "💰 *DEPÓSITO*\n\n"
-            f"Wallet USDT TRC20:\n"
-            f"`{USDT_TRC20_ADDRESS or 'NO CONFIGURADA'}`\n\n"
-            "Para enviar un depósito pulsa el botón inferior.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "📥 Iniciar depósito",
-                    callback_data="start_deposit"
-                )],
-                [InlineKeyboardButton(
-                    "⬅️ Volver",
-                    callback_data="user_home"
-                )]
-            ])
-        )
-        return
-
-    if data == "start_deposit":
-        await query.edit_message_text(
-            "💰 *NUEVO DEPÓSITO*\n\n"
-            f"Wallet USDT TRC20:\n`{USDT_TRC20_ADDRESS or 'NO CONFIGURADA'}`\n\n"
-            "Escribe `/depositar` para iniciar el registro del depósito.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "⬅️ Volver",
-                    callback_data="user_home"
-                )]
-            ])
-        )
-        return
-
-    if data == "user_withdraw":
-        await query.edit_message_text(
-            "💸 *RETIRO*\n\n"
-            "Escribe `/retirar` para solicitar un retiro.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "⬅️ Volver",
-                    callback_data="user_home"
-                )]
-            ])
-        )
-        return
-
-
-# =========================================================
-# TEXTO PRIVADO
-# =========================================================
-
-async def private_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not private_only(update):
-        return
-
-    # No respondemos automáticamente a textos normales para evitar
-    # mensajes inesperados durante los formularios.
-    pass
-
-
-# =========================================================
-# COMANDOS ADMIN
-# =========================================================
-
-async def backup_command(update, context):
-    if not private_only(update):
-        return
-
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ No autorizado.")
-        return
-
-    os.makedirs(BACKUP_DIR, exist_ok=True)
-    filename = f"database_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-    path = os.path.join(BACKUP_DIR, filename)
-
-    try:
-        conn = db()
-        backup_conn = sqlite3.connect(path)
-        conn.backup(backup_conn)
-        backup_conn.close()
-        conn.close()
-
-        with open(path, "rb") as f:
-            await context.bot.send_document(
-                chat_id=ADMIN_TELEGRAM_ID,
-                document=InputFile(f, filename=filename),
-                caption="💾 Respaldo de la base de datos."
-            )
-
-        await send_admin_menu(
-            ADMIN_TELEGRAM_ID,
-            context,
-            "✅ *RESPALDO CREADO*\n\nPanel administrativo:"
-        )
-    except Exception as e:
-        await update.message.reply_text(
-            f"❌ Error creando respaldo:\n`{e}`",
-            parse_mode="Markdown"
-        )
-
-
-async def status_command(update, context):
-    if not private_only(update):
-        return
-
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ No autorizado.")
-        return
-
-    conn = db()
-    users = conn.execute("SELECT COUNT(*) AS c FROM usuarios").fetchone()["c"]
-    deposits = conn.execute(
-        "SELECT COUNT(*) AS c FROM depositos WHERE estado='pendiente'"
-    ).fetchone()["c"]
-    withdrawals = conn.execute(
-        "SELECT COUNT(*) AS c FROM retiros WHERE estado='pendiente'"
-    ).fetchone()["c"]
-    conn.close()
-
-    await update.message.reply_text(
-        "📊 *ESTADO*\n\n"
-        f"Usuarios: *{users}*\n"
-        f"Depósitos pendientes: *{deposits}*\n"
-        f"Retiros pendientes: *{withdrawals}*",
-        parse_mode="Markdown"
-    )
-
-
-# =========================================================
-# ERRORES
-# =========================================================
-
-async def error_handler(update, context):
-    print(f"❌ Error: {context.error}")
-
-
-# =========================================================
-# MAIN
-# =========================================================
+            print(f"⚠️ No se pudo enviar privado de rechazo: {e}")
 
 async def main():
-    if not TELEGRAM_TOKEN:
-        raise RuntimeError(
-            "Falta la variable de entorno TELEGRAM_TOKEN."
-        )
-
-    if ADMIN_TELEGRAM_ID == 0:
-        raise RuntimeError(
-            "Falta la variable de entorno ADMIN_TELEGRAM_ID."
-        )
-
-    init_db()
+    inicializar_rifa()
+    
+    # 1. Levanta el servidor web para satisfacer a Render
     await start_web_server()
 
-    app = (
-        ApplicationBuilder()
-        .token(TELEGRAM_TOKEN)
-        .build()
-    )
+    # 2. Inicia el bot de Telegram
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    # Obtener username del bot para construir links de referido.
-    try:
-        me = await app.bot.get_me()
-        app.bot_data["bot_username"] = me.username or ""
-        print(f"🤖 Bot: @{me.username}")
-    except Exception as e:
-        print(f"⚠️ No se pudo obtener username del bot: {e}")
-        app.bot_data["bot_username"] = ""
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("reset", reset_command))
+    app.add_handler(CommandHandler("ganador", ganador_command))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, bienvenida_nuevos_usuarios))
+    app.add_handler(CallbackQueryHandler(boton_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
 
-    # -------------------------------
-    # /start
-    # -------------------------------
-    app.add_handler(
-        CommandHandler("start", start_command, filters=filters.ChatType.PRIVATE)
-    )
-
-    # -------------------------------
-    # Admin
-    # -------------------------------
-    app.add_handler(
-        CommandHandler("admin", admin_command, filters=filters.ChatType.PRIVATE)
-    )
-    app.add_handler(
-        CommandHandler("backup", backup_command, filters=filters.ChatType.PRIVATE)
-    )
-    app.add_handler(
-        CommandHandler("status", status_command, filters=filters.ChatType.PRIVATE)
-    )
-
-    # -------------------------------
-    # Depósitos
-    # -------------------------------
-    deposit_handler = ConversationHandler(
-        entry_points=[
-            CommandHandler(
-                "depositar",
-                start_deposit,
-                filters=filters.ChatType.PRIVATE
-            )
-        ],
-        states={
-            DEP_AMOUNT: [
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-                    receive_deposit_amount
-                )
-            ],
-            DEP_TX: [
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-                    receive_deposit_tx
-                )
-            ],
-            DEP_PHOTO: [
-                MessageHandler(
-                    filters.PHOTO & filters.ChatType.PRIVATE,
-                    receive_deposit_photo
-                ),
-                CommandHandler(
-                    "skip",
-                    skip_deposit_photo,
-                    filters=filters.ChatType.PRIVATE
-                )
-            ],
-        },
-        fallbacks=[
-            CommandHandler(
-                "cancelar",
-                cancel_deposit,
-                filters=filters.ChatType.PRIVATE
-            )
-        ],
-        allow_reentry=True,
-    )
-    app.add_handler(deposit_handler)
-
-    # -------------------------------
-    # Retiros
-    # -------------------------------
-    withdraw_handler = ConversationHandler(
-        entry_points=[
-            CommandHandler(
-                "retirar",
-                start_withdraw,
-                filters=filters.ChatType.PRIVATE
-            )
-        ],
-        states={
-            WITHDRAW_AMOUNT: [
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-                    receive_withdraw_amount
-                )
-            ],
-            WITHDRAW_ADDRESS: [
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-                    receive_withdraw_address
-                )
-            ],
-        },
-        fallbacks=[
-            CommandHandler(
-                "cancelar",
-                cancel_withdraw,
-                filters=filters.ChatType.PRIVATE
-            )
-        ],
-        allow_reentry=True,
-    )
-    app.add_handler(withdraw_handler)
-
-    # -------------------------------
-    # Botones
-    # -------------------------------
-    app.add_handler(
-        CallbackQueryHandler(callback_handler)
-    )
-
-    # -------------------------------
-    # Texto normal
-    # -------------------------------
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-            private_text
-        )
-    )
-
-    app.add_error_handler(error_handler)
-
-    print("==============================================")
-    print("🤖 BOT DE INVERSIÓN INICIADO")
-    print(f"👑 ADMIN_TELEGRAM_ID = {ADMIN_TELEGRAM_ID}")
-    print(f"💾 DB = {DB_FILE}")
-    print(f"💰 Wallet TRC20 configurada = {bool(USDT_TRC20_ADDRESS)}")
-    print("🔒 Funciones privadas: SOLO CHAT PRIVADO")
-    print("==============================================")
-
+    print("🤖 Bot de Rifa iniciado correctamente...")
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
 
+    # Mantiene el proceso activo
     await asyncio.Event().wait()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Codigo modificado Gran Sorteo 100
+
+
+import os
+import json
+import uuid
+import asyncio
+from aiohttp import web
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+
+# --- SERVIDOR WEB PARA CUMPLIR CON EL PUERTO DE RENDER ---
+async def handle_web(request):
+   return web.Response(text="Bot de Rifa Activo y en Línea 24/7!")
+ 
+async def start_web_server():
+   app = web.Application()
+   app.router.add_get("/", handle_web)
+   runner = web.AppRunner(app)
+   await runner.setup()
+    
+   port = int(os.environ.get("PORT", 10000))
+   site = web.TCPSite(runner, "0.0.0.0", port)
+   await site.start()
+   print(f"🌐 Servidor web corriendo en el puerto {port}")
+# ---------------------------------------------------------
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+ADMIN_TELEGRAM_ID = int(os.environ.get("ADMIN_TELEGRAM_ID", "0"))
+
+DB_FILE = "rifa_db.json"
+
+def inicializar_rifa():
+   try:
+       if not os.path.exists(DB_FILE):
+           data_inicial = {
+               "estado_rifa": "activa",
+               "numeros": {str(i): {"estado": "disponible", "nombre": "", "user_id": "", "username": ""} for i in range(1, 101)},
+               "solicitudes_pendientes": {}
+           }
+           with open(DB_FILE, "w") as f:
+               json.dump(data_inicial, f, indent=4)
+   except Exception as e:
+       print(f"Error al inicializar JSON: {e}")
+
+def borrar_y_recrear_base_datos():
+   try:
+       if os.path.exists(DB_FILE):
+           os.remove(DB_FILE)
+   except Exception as e:
+       print(f"Error al eliminar archivo: {e}")
+   inicializar_rifa()
+
+def obtener_data_completa():
+   inicializar_rifa()
+   try:
+       with open(DB_FILE, "r") as f:
+           data = json.load(f)
+           if "estado_rifa" not in data:
+               data["estado_rifa"] = "activa"
+           if "solicitudes_pendientes" not in data:
+               data["solicitudes_pendientes"] = {}
+           return data
+   except Exception as e:
+       borrar_y_recrear_base_datos()
+       with open(DB_FILE, "r") as f:
+           return json.load(f)
+
+def guardar_data_completa(data):
+   try:
+       with open(DB_FILE, "w") as f:
+           json.dump(data, f, indent=4)
+   except Exception as e:
+       print(f"Error al guardar JSON: {e}")
+
+def generar_texto_lista():
+   data = obtener_data_completa()
+   rifa = data["numeros"]
+   texto = "🎟️ *LISTA OFICIAL DE LA RIFA (1 al 100)* 🎟️\n\n"
+   disponibles = 0
+   for i in range(1, 101):
+       num_str = str(i).zfill(2)
+       info = rifa[str(i)]
+       estado = info.get("estado", "disponible")
+ 
+       if estado == "disponible":
+           texto += f"🟢 *{num_str}*: Disponible\n"
+           disponibles += 1
+       elif estado == "pendiente":
+           texto += f"🟡 *{num_str}*: En verificación de pago...\n"
+       else:
+           nombre = info.get("nombre", "Usuario")
+           user_id = info.get("user_id")
+           if user_id:
+               texto += f"🔴 *{num_str}*: Ocupado por [{nombre}](tg://user?id={user_id})\n"
+           else:
+               texto += f"🔴 *{num_str}*: Ocupado por {nombre}\n"
+            
+   texto += f"\n📊 *Resumen:* Quedan {disponibles} números disponibles."
+   if data.get("estado_rifa") == "finalizada":
+       texto += "\n\n🔒 *ESTADO:* Rifa cerrada/finalizada."
+   return texto
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   user = update.effective_user
+   nombre = user.first_name or "Participante"
+   data_rifa = obtener_data_completa()
+   estado_actual_rifa = data_rifa.get("estado_rifa", "activa")
+
+   respuesta = (
+       f"¡Hola {nombre}! Estado actual de Gran Sorteo 100. ✨\n\n"
+       f"{generar_texto_lista()}"
+   )
+   if estado_actual_rifa == "activa":
+       respuesta += "\n\n👉 *¿Cómo comprar?* Envía los números que deseas separados por coma (ej: *7, 14*) aquí o en el grupo."
+    
+   await update.message.reply_text(respuesta, parse_mode="Markdown")
+
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   user = update.effective_user
+   if user.id != ADMIN_TELEGRAM_ID:
+       await update.message.reply_text("⛔ No estás autorizado para resetear el sorteo.")
+       return
+    
+   borrar_y_recrear_base_datos()
+   await update.message.reply_text("🔄 *¡Gran Sorteo 100 ha sido reseteado con éxito!* Todos los números vuelven a estar disponibles.\n\n" + generar_texto_lista(), parse_mode="Markdown")
+
+async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   user = update.effective_user
+   if user.id != ADMIN_TELEGRAM_ID:
+       await update.message.reply_text("⛔ No estás autorizado para dar el resultado ganador.")
+       return
+
+   if not context.args:
+       await update.message.reply_text("⚠️ Por favor indica el número ganador. Ejemplo: `/ganador 14`", parse_mode="Markdown")
+       return
+
+   num_ingresado = context.args[0].strip()
+   if not num_ingresado.isdigit() or not (1 <= int(num_ingresado) <= 100):
+       await update.message.reply_text("⚠️ El número debe estar entre 1 y 100.", parse_mode="Markdown")
+       return
+
+   num_str = str(int(num_ingresado))
+   data_rifa = obtener_data_completa()
+   info_num = data_rifa["numeros"].get(num_str, {})
+
+   estado = info_num.get("estado")
+   if estado != "ocupado":
+       await update.message.reply_text(f"⚠️ El número *{num_ingresado.zfill(2)}* no está ocupado por ningún usuario (su estado es: *{estado}*).", parse_mode="Markdown")
+       return
+
+   ganador_nombre = info_num.get("nombre")
+   ganador_id = info_num.get("user_id")
+   num_formateado = num_str.zfill(2)
+   ganador_mencion = f"[{ganador_nombre}](tg://user?id={ganador_id})" if ganador_id else ganador_nombre
+
+   msg_anuncio = (
+       f"🏆 *¡RESULTADO OFICIAL DE GRAN SORTEO 100!* 🏆\n\n"
+       f"🎯 El Resultado de la Florida Pick 3 es el: *{num_formateado}*\n\n"
+       f"🎉 ¡El usuario {ganador_mencion} es el ganador de este número! Muchas felicidades. 🥳\n\n"
+       f"Por favor, póngase en contacto con el administrador @yordanisr para recibir su premio. "
+       f"Una vez que reciba la transferencia, le pedimos por favor que haga una captura de pantalla y la envíe a este grupo como evidencia de que recibió su pago y que todo funciona con total transparencia."
+   )
+   await update.message.reply_text(msg_anuncio, parse_mode="Markdown")
+
+   if ganador_id:
+       try:
+           msg_privado = (
+               f"🎉 *¡FELICIDADES {ganador_nombre}!* 🎉\n\n"
+               f"¡Has ganado Gran Sorteo 100 con tu número *{num_formateado}*! 🏆\n\n"
+               f"Por favor, ponte en contacto con el administrador @yordanisr para recibir tu premio. "
+               f"Una vez que recibas la transferencia, haz una captura de pantalla y envíala al grupo como evidencia de que todo funciona con transparencia. 🤝"
+           )
+           await context.bot.send_message(chat_id=ganador_id, text=msg_privado, parse_mode="Markdown")
+       except Exception as e:
+           print(f"⚠️ No se pudo enviar mensaje privado al ganador: {e}")
+
+async def bienvenida_nuevos_usuarios(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   for nuevo_usuario in update.message.new_chat_members:
+       if nuevo_usuario.id == context.bot.id:
+           continue
+       
+       nombre = nuevo_usuario.first_name or "Amigo"
+       mencion = f"[{nombre}](tg://user?id={nuevo_usuario.id})"
+       
+       texto_bienvenida = (
+           f"🎯 *¡Bienvenido/a {mencion} a Gran Sorteo 100!* 🎟️\n\n"
+           f"Nos alegra mucho tenerte por aquí. Este es un espacio exclusivo y transparente para participar por grandes premios en efectivo.\n\n"
+           f"A continuación, te explicamos cómo funciona la dinámica:\n"
+           f"* 🔢 *Los Números:* Disponemos de una tabla con *100 números* (del 00 al 99). Cada participante puede elegir uno o varios números según su preferencia.\n"
+           f"* 💵 *Valor:* Cada número tiene un costo de *10 a 20 reales*.\n"
+           f"* 🏆 *El Premio:* Una vez que se ocupen los 100 números y se confirme el pago de todos, anunciaremos la fecha oficial del evento. El premio en efectivo va desde *400 hasta 1,000 reales*.\n"
+           f"* ⚖️ *Transparencia Total:* El ganador se define de manera 100% transparente utilizando los resultados oficiales de la *Lotería de Florida*.\n\n"
+           f"📌 *Reglas del Grupo:*\n"
+           f"1. Respetar a todos los miembros de la comunidad.\n"
+           f"2. Para apartar un número, consulta los disponibles enviando la palabra `lista` y envía tu comprobante de pago.\n"
+           f"3. Los números solo se consideran vendidos y asegurados una vez confirmado el pago.\n\n"
+           f"¡Mucha suerte y gracias por formar parte de *Gran Sorteo 100*! 🍀✨"
+       )
+       
+       try:
+           await update.message.reply_text(texto_bienvenida, parse_mode="Markdown")
+       except Exception as e:
+           print(f"Error enviando bienvenida: {e}")
+
+async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   if not update.message or not update.message.text:
+       return
+
+   mensaje_texto = update.message.text.strip()
+   comando = mensaje_texto.lower()
+   user = update.effective_user
+   user_id = user.id
+   nombre_usuario = user.first_name or "Usuario"
+   chat_id = update.effective_chat.id
+
+   data_rifa = obtener_data_completa()
+   rifa = data_rifa["numeros"]
+   solicitudes = data_rifa.get("solicitudes_pendientes", {})
+   estado_actual_rifa = data_rifa.get("estado_rifa", "activa")
+
+   if comando in ["hola", "buenas", "lista", "inicio", "rifa", "sorteo"]:
+       await update.message.reply_text(
+           f"¡Hola {nombre_usuario}! Estado actual de Gran Sorteo 100:\n\n{generar_texto_lista()}",
+           parse_mode="Markdown"
+       )
+       return
+
+   partes = [p.strip() for p in mensaje_texto.split(",")]
+   es_lista_numeros = all(p.isdigit() for p in partes) if partes else False
+
+   if es_lista_numeros:
+       if estado_actual_rifa == "finalizada":
+           await update.message.reply_text("🔒 *Lo sentimos, el sistema está cerrado.*", parse_mode="Markdown")
+           return
+
+       ocupados, pendientes, validos_para_reservar, invalidos = [], [], [], []
+
+       for p in partes:
+           num_elegido = int(p)
+           if 1 <= num_elegido <= 100:
+               num_str = str(num_elegido)
+               info = rifa[num_str]
+               est = info.get("estado", "disponible")
+
+               if est == "ocupado":
+                   ocupados.append(f"*{num_str.zfill(2)}*")
+               elif est == "pendiente":
+                   pendientes.append(f"*{num_str.zfill(2)}*")
+               else:
+                   validos_para_reservar.append(num_str)
+           else:
+               invalidos.append(p)
+
+       mensajes_conflicto = []
+       if ocupados:
+           mensajes_conflicto.append(f"🔴 El/los número(s) {', '.join(ocupados)} ya está(n) *OCUPADO(S)*.")
+       if pendientes:
+           mensajes_conflicto.append(f"🟡 El/los número(s) {', '.join(pendientes)} está(n) *EN PROCESO DE VERIFICACIÓN*.")
+       if invalidos:
+           mensajes_conflicto.append(f"⚠️ El/los número(s) {', '.join(invalidos)} está(n) fuera del rango (1 al 100).")
+
+       if mensajes_conflicto and not validos_para_reservar:
+           await update.message.reply_text(f"Hola {nombre_usuario}:\n" + "\n".join(mensajes_conflicto), parse_mode="Markdown")
+           return
+
+       if validos_para_reservar:
+           req_id = "r" + str(uuid.uuid4().int)[:4]
+
+           for n in validos_para_reservar:
+               rifa[n]["estado"] = "pendiente"
+
+           solicitudes[req_id] = {
+               "nombre": nombre_usuario,
+               "user_id": user_id,
+               "username": user.username or "",
+               "numeros": validos_para_reservar,
+               "chat_origen": chat_id
+           }
+
+           data_rifa["numeros"] = rifa
+           data_rifa["solicitudes_pendientes"] = solicitudes
+           guardar_data_completa(data_rifa)
+
+           nums_solicitados_txt = ", ".join([n.zfill(2) for n in validos_para_reservar])
+
+           await update.message.reply_text(
+               f"⏳ *SOLICITUD EN PROCESO* ⏳\n\n"
+               f"Hola {nombre_usuario}, tus números (*{nums_solicitados_txt}*) están *reservados temporalmente*.\n\n"
+               f"Por favor, póngase en contacto con el administrador @yordanisr para realizar la transferencia.",
+               parse_mode="Markdown"
+           )
+
+           keyboard = [
+               [
+                   InlineKeyboardButton("🟢 Confirmar Pago", callback_data=f"conf_{req_id}"),
+                   InlineKeyboardButton("🔴 Rechazar Pago", callback_data=f"rech_{req_id}")
+               ]
+           ]
+           reply_markup = InlineKeyboardMarkup(keyboard)
+
+           txt_admin = (
+               f"📥 *NUEVA SOLICITUD DE COMPRA* (ID: `{req_id}`)\n\n"
+               f"👤 *Cliente:* {nombre_usuario}\n"
+               f"💬 *Username:* @{user.username if user.username else 'Sin alias'}\n"
+               f"🎟️ *Números:* *{nums_solicitados_txt}*\n\n"
+               f"¿Deseas confirmar el pago?"
+           )
+
+           try:
+               await context.bot.send_message(
+                   chat_id=ADMIN_TELEGRAM_ID,
+                   text=txt_admin,
+                   reply_markup=reply_markup,
+                   parse_mode="Markdown"
+               )
+           except Exception as e:
+               print(f"Error enviando mensaje al admin: {e}")
+
+async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   query = update.callback_query
+   await query.answer()
+
+   if query.from_user.id != ADMIN_TELEGRAM_ID:
+       await query.edit_message_text("⛔ No estás autorizado.")
+       return
+
+   data_callback = query.data
+   accion, req_id = data_callback.split("_", 1)
+
+   data_rifa = obtener_data_completa()
+   rifa = data_rifa["numeros"]
+   solicitudes = data_rifa.get("solicitudes_pendientes", {})
+
+   if req_id not in solicitudes:
+       await query.edit_message_text(f"⚠️ La solicitud `{req_id}` ya fue procesada o no existe.", parse_mode="Markdown")
+       return
+
+   sol = solicitudes[req_id]
+   user_nombre = sol["nombre"]
+   user_id = sol["user_id"]
+   user_nums = sol["numeros"]
+   chat_origen = sol["chat_origen"]
+
+   nums_formatted = ", ".join([n.zfill(2) for n in user_nums])
+   usuario_mencion = f"[{user_nombre}](tg://user?id={user_id})"
+
+   if accion == "conf":
+       for n in user_nums:
+           rifa[n]["estado"] = "ocupado"
+           rifa[n]["nombre"] = user_nombre
+           rifa[n]["user_id"] = user_id
+
+       del solicitudes[req_id]
+       data_rifa["numeros"] = rifa
+       data_rifa["solicitudes_pendientes"] = solicitudes
+
+       if all(rifa[str(n)]["estado"] == "ocupado" for n in range(1, 101)):
+           data_rifa["estado_rifa"] = "finalizada"
+
+       guardar_data_completa(data_rifa)
+
+       await query.edit_message_text(f"✅ *Solicitud {req_id} APROBADA.* Números: {nums_formatted}", parse_mode="Markdown")
+
+       try:
+           msg_grupo = f"🎉 *¡PAGO CONFIRMADO!* 🎉\n\n👤 *Usuario:* {usuario_mencion}\n🎟️ *Números asignados:* *{nums_formatted}*\n\n¡Muchas felicidades! 🤝"
+           await context.bot.send_message(chat_id=chat_origen, text=msg_grupo, parse_mode="Markdown")
+       except Exception as e:
+           print(f"Error enviando aviso al grupo: {e}")
+
+       try:
+           msg_privado = f"✅ *¡PAGO APROBADO!* 🎉\n\nHola {user_nombre}, tu pago ha sido verificado. Tus números (*{nums_formatted}*) ya están registrados oficialmente a tu nombre en Gran Sorteo 100.\n\n¡Mucha suerte! 🍀"
+           await context.bot.send_message(chat_id=user_id, text=msg_privado, parse_mode="Markdown")
+       except Exception as e:
+           print(f"⚠️ No se pudo enviar privado de aprobación: {e}")
+
+   elif accion == "rech":
+       for n in user_nums:
+           rifa[n] = {"estado": "disponible", "nombre": "", "user_id": "", "username": ""}
+
+       del solicitudes[req_id]
+       data_rifa["numeros"] = rifa
+       data_rifa["solicitudes_pendientes"] = solicitudes
+       guardar_data_completa(data_rifa)
+
+       await query.edit_message_text(f"❌ *Solicitud {req_id} RECHAZADA.*", parse_mode="Markdown")
+
+       try:
+           msg_cancel_grupo = f"⚠️ *SOLICITUD RECHAZADA* ⚠️\n\nEl pago de {usuario_mencion} para el/los número(s) *{nums_formatted}* no pudo ser verificado. Los números vuelven a estar 🟢 *Disponibles*."
+           await context.bot.send_message(chat_id=chat_origen, text=msg_cancel_grupo, parse_mode="Markdown")
+       except Exception as e:
+           print(f"Error notificando rechazo en grupo: {e}")
+
+       try:
+           msg_cancel_privado = f"❌ *SOLICITUD RECHAZADA* ❌\n\nHola {user_nombre}, lamentablemente tu pago para el/los número(s) *{nums_formatted}* fue rechazado y los números han sido liberados nuevamente."
+           await context.bot.send_message(chat_id=user_id, text=msg_cancel_privado, parse_mode="Markdown")
+       except Exception as e:
+           print(f"⚠️ No se pudo enviar privado de rechazo: {e}")
+
+async def main():
+   inicializar_rifa()
+    
+   await start_web_server()
+
+   app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+   app.add_handler(CommandHandler("start", start_command))
+   app.add_handler(CommandHandler("reset", reset_command))
+   app.add_handler(CommandHandler("ganador", ganador_command))
+   app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, bienvenida_nuevos_usuarios))
+   app.add_handler(CallbackQueryHandler(boton_callback))
+   app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
+
+   print("🤖 Bot de Gran Sorteo 100 iniciado correctamente...")
+   await app.initialize()
+   await app.start()
+   await app.updater.start_polling()
+
+   await asyncio.Event().wait()
+
+if __name__ == "__main__":
+   asyncio.run(main())
+
+
+
+
+nuevo ok
+
+
+import os
+import json
+import uuid
+import asyncio
+from datetime import datetime
+from aiohttp import web
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+
+# --- SERVIDOR WEB PARA CUMPLIR CON EL PUERTO DE RENDER ---
+async def handle_web(request):
+   return web.Response(text="Bot de Rifa Activo y en Línea 24/7!")
+ 
+async def start_web_server():
+   app = web.Application()
+   app.router.add_get("/", handle_web)
+   runner = web.AppRunner(app)
+   await runner.setup()
+    
+   port = int(os.environ.get("PORT", 10000))
+   site = web.TCPSite(runner, "0.0.0.0", port)
+   await site.start()
+   print(f"🌐 Servidor web corriendo en el puerto {port}")
+# ---------------------------------------------------------
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+ADMIN_TELEGRAM_ID = int(os.environ.get("ADMIN_TELEGRAM_ID", "0"))
+
+DB_FILE = "rifa_db.json"
+
+def inicializar_rifa():
+   try:
+       if not os.path.exists(DB_FILE):
+           data_inicial = {
+               "estado_rifa": "activa",
+               "numeros": {str(i): {"estado": "disponible", "nombre": "", "user_id": "", "username": ""} for i in range(1, 101)},
+               "solicitudes_pendientes": {}
+           }
+           with open(DB_FILE, "w") as f:
+               json.dump(data_inicial, f, indent=4)
+   except Exception as e:
+       print(f"Error al inicializar JSON: {e}")
+
+def borrar_y_recrear_base_datos():
+   try:
+       if os.path.exists(DB_FILE):
+           os.remove(DB_FILE)
+   except Exception as e:
+       print(f"Error al eliminar archivo: {e}")
+   inicializar_rifa()
+
+def obtener_data_completa():
+   inicializar_rifa()
+   try:
+       with open(DB_FILE, "r") as f:
+           data = json.load(f)
+           if "estado_rifa" not in data:
+               data["estado_rifa"] = "activa"
+           if "solicitudes_pendientes" not in data:
+               data["solicitudes_pendientes"] = {}
+           return data
+   except Exception as e:
+       borrar_y_recrear_base_datos()
+       with open(DB_FILE, "r") as f:
+           return json.load(f)
+
+def guardar_data_completa(data):
+   try:
+       with open(DB_FILE, "w") as f:
+           json.dump(data, f, indent=4)
+   except Exception as e:
+       print(f"Error al guardar JSON: {e}")
+
+def generar_texto_lista():
+   data = obtener_data_completa()
+   rifa = data["numeros"]
+   texto = "🎟️ *LISTA OFICIAL DE LA RIFA (1 al 100)* 🎟️\n\n"
+   disponibles = 0
+   for i in range(1, 101):
+       num_str = str(i).zfill(2)
+       info = rifa[str(i)]
+       estado = info.get("estado", "disponible")
+ 
+       if estado == "disponible":
+           texto += f"🟢 *{num_str}*: Disponible\n"
+           disponibles += 1
+       elif estado == "pendiente":
+           texto += f"🟡 *{num_str}*: En verificación de pago...\n"
+       else:
+           nombre = info.get("nombre", "Usuario")
+           user_id = info.get("user_id")
+           if user_id:
+               texto += f"🔴 *{num_str}*: Ocupado por [{nombre}](tg://user?id={user_id})\n"
+           else:
+               texto += f"🔴 *{num_str}*: Ocupado por {nombre}\n"
+            
+   texto += f"\n📊 *Resumen:* Quedan {disponibles} números disponibles."
+   estado_actual = data.get("estado_rifa")
+   if estado_actual == "finalizada":
+       texto += "\n\n🔒 *ESTADO:* Rifa cerrada/finalizada."
+   elif estado_actual == "bloqueada":
+       texto += "\n\n⛔ *ESTADO:* Rifa temporalmente bloqueada por el administrador."
+   return texto
+
+TEXTO_REGLAS_OFICIAL = (
+   "📌 *REGLAS Y DINÁMICA DEL GRUPO (Gran Sorteo 100):*\n\n"
+   "1️⃣ *Respeto:* Mantén un ambiente de respeto absoluto hacia todos los miembros de la comunidad y administradores.\n"
+   "2️⃣ *Números y Costo:* Disponemos de una tabla con *100 números* (del 01 al 100). Cada número tiene un valor de *20 reales*. Envía la palabra `lista` para ver los disponibles y escribe los que deseas separados por coma (ej: *7, 14*) aquí o en el grupo.\n"
+   "3️⃣ *Condición del Sorteo:* El sorteo se realizará **únicamente cuando los 100 números estén 100% ocupados y pagados**. Esto puede demorar varios días dependiendo de la rapidez en que los usuarios escojan y ocupen los números.\n"
+   "4️⃣ *Garantía de Devolución:* Si algún participante adquiere sus números pero **no desea esperar**, puede ponerse en contacto con el administrador (@yordanisr) en cualquier momento para solicitar la **devolución íntegra de su dinero**.\n"
+   "5️⃣ *Entrega del Premio:* El usuario ganador recibirá un premio de *1000 reales*. Este pago se efectuará según prefiera el ganador: mediante transferencia vía PIX, o si lo prefiere, se le hará entrega en Cuba a su familiar según el tipo de cambio vigente en el grupo de Remesas del administrador. (Para conocer esta información y tasa de cambio, es obligatorio unirse al grupo de WhatsApp del administrador: https://chat.whatsapp.com/HEaEIKaEjksJRrWEKcIVEo?s=sh&p=a&ilr=0).\n"
+   "6️⃣ *Transparencia:* El ganador se define utilizando los resultados oficiales de la *Lotería de Florida* (Pick 3) en el horario nocturno.\n\n"
+   "🤝 *¡Ayúdanos a crecer!* Puedes invitar a otros usuarios a unirse al grupo mediante este enlace: https://t.me/+didZDftOZAhmZjdh para que participen en el sorteo."
+)
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   user = update.effective_user
+   nombre = user.first_name or "Participante"
+   data_rifa = obtener_data_completa()
+   estado_actual_rifa = data_rifa.get("estado_rifa", "activa")
+
+   respuesta = (
+       f"¡Hola {nombre}! Estado actual de Gran Sorteo 100. ✨\n\n"
+       f"{generar_texto_lista()}"
+   )
+   if estado_actual_rifa == "activa":
+       respuesta += "\n\n👉 *¿Cómo comprar?* Envía los números que deseas separados por coma (ej: *7, 14*) aquí o en el grupo."
+    
+   await update.message.reply_text(respuesta, parse_mode="Markdown")
+
+async def reglas_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   mensaje_reglas = f"🎯 *REGLAS OFICIALES - Gran Sorteo 100* 🎟️\n\n{TEXTO_REGLAS_OFICIAL}"
+   await update.message.reply_text(mensaje_reglas, parse_mode="Markdown")
+
+async def bloquear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   user = update.effective_user
+   if user.id != ADMIN_TELEGRAM_ID:
+       await update.message.reply_text("⛔ No estás autorizado para bloquear la rifa.")
+       return
+
+   data_rifa = obtener_data_completa()
+   data_rifa["estado_rifa"] = "bloqueada"
+   guardar_data_completa(data_rifa)
+
+   await update.message.reply_text("⛔ *La rifa ha sido bloqueada temporalmente.* Ningún usuario podrá escoger números nuevos hasta que el administrador la desbloquee. (Los datos existentes están seguros).", parse_mode="Markdown")
+
+async def desbloquear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   user = update.effective_user
+   if user.id != ADMIN_TELEGRAM_ID:
+       await update.message.reply_text("⛔ No estás autorizado para desbloquear la rifa.")
+       return
+
+   data_rifa = obtener_data_completa()
+   if data_rifa.get("estado_rifa") == "finalizada":
+       await update.message.reply_text("⚠️ La rifa se encuentra finalizada por un sorteo completado. Si deseas reiniciar todo desde cero, usa `/reset`.", parse_mode="Markdown")
+       return
+
+   data_rifa["estado_rifa"] = "activa"
+   guardar_data_completa(data_rifa)
+
+   await update.message.reply_text("🟢 *La rifa ha sido desbloqueada.* Ya se pueden escoger números nuevamente con total normalidad.\n\n" + generar_texto_lista(), parse_mode="Markdown")
+
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   user = update.effective_user
+   if user.id != ADMIN_TELEGRAM_ID:
+       await update.message.reply_text("⛔ No estás autorizado para resetear el sorteo.")
+       return
+    
+   borrar_y_recrear_base_datos()
+   await update.message.reply_text("🔄 *¡Gran Sorteo 100 ha sido reseteado con éxito!* Todos los números vuelven a estar disponibles.\n\n" + generar_texto_lista(), parse_mode="Markdown")
+
+async def liberar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   user = update.effective_user
+   if user.id != ADMIN_TELEGRAM_ID:
+       await update.message.reply_text("⛔ No estás autorizado para liberar números.")
+       return
+
+   if not context.args:
+       await update.message.reply_text("⚠️ Por favor indica el nombre o parte del nombre del usuario a liberar. Ejemplo: `/liberar Juan`", parse_mode="Markdown")
+       return
+
+   nombre_buscar = " ".join(context.args).strip().lower()
+   data_rifa = obtener_data_completa()
+   rifa = data_rifa["numeros"]
+
+   numeros_liberados = []
+   for num_str, info in rifa.items():
+       if info.get("estado") == "ocupado":
+           nombre_usuario_reg = info.get("nombre", "").lower()
+           if nombre_buscar in nombre_usuario_reg:
+               numeros_liberados.append(num_str.zfill(2))
+               rifa[num_str] = {"estado": "disponible", "nombre": "", "user_id": "", "username": ""}
+
+   if not numeros_liberados:
+       await update.message.reply_text(f"⚠️ No se encontraron números ocupados asociados a un usuario que coincida con: *{nombre_buscar}*.", parse_mode="Markdown")
+       return
+
+   if data_rifa.get("estado_rifa") == "finalizada":
+       data_rifa["estado_rifa"] = "activa"
+
+   data_rifa["numeros"] = rifa
+   guardar_data_completa(data_rifa)
+
+   nums_str_lib = ", ".join(numeros_liberados)
+   msg_liberar = (
+       f"🔄 *DEVOLUCIÓN Y LIBERACIÓN DE NÚMEROS* 🔄\n\n"
+       f"Se han procesado las devoluciones correspondientes. El/los número(s) *{nums_str_lib}* (del usuario *{nombre_buscar.capitalize()}*) han sido liberados y vuelven a estar 🟢 *Disponibles* en la lista."
+   )
+   await update.message.reply_text(msg_liberar, parse_mode="Markdown")
+
+async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   user = update.effective_user
+   if user.id != ADMIN_TELEGRAM_ID:
+       await update.message.reply_text("⛔ No estás autorizado para dar el resultado ganador.")
+       return
+
+   if not context.args:
+       await update.message.reply_text("⚠️ Por favor indica el número ganador. Ejemplo: `/ganador 14`", parse_mode="Markdown")
+       return
+
+   num_ingresado = context.args[0].strip()
+   if not num_ingresado.isdigit() or not (1 <= int(num_ingresado) <= 100):
+       await update.message.reply_text("⚠️ El número debe estar entre 1 y 100.", parse_mode="Markdown")
+       return
+
+   num_str = str(int(num_ingresado))
+   data_rifa = obtener_data_completa()
+   info_num = data_rifa["numeros"].get(num_str, {})
+
+   estado = info_num.get("estado")
+   if estado != "ocupado":
+       await update.message.reply_text(f"⚠️ El número *{num_ingresado.zfill(2)}* no está ocupado por ningún usuario (su estado es: *{estado}*).", parse_mode="Markdown")
+       return
+
+   ganador_nombre = info_num.get("nombre")
+   ganador_id = info_num.get("user_id")
+   num_formateado = num_str.zfill(2)
+   ganador_mencion = f"[{ganador_nombre}](tg://user?id={ganador_id})" if ganador_id else ganador_nombre
+
+   data_rifa["estado_rifa"] = "finalizada"
+   guardar_data_completa(data_rifa)
+
+   msg_resultado = (
+       f"🎯 *¡RESULTADO OFICIAL DE LA LOTERÍA!* 🎯\n\n"
+       f"El número ganador de la Florida Pick 3 es el: *{num_formateado}*"
+   )
+   await update.message.reply_text(msg_resultado, parse_mode="Markdown")
+
+   msg_ganador = (
+       f"🎉 *¡Felicidades al Ganador!* 🎉\n\n"
+       f"El usuario {ganador_mencion} ha ganado con el número *{num_formateado}* un premio de *1000 reales*. ¡Muchas felicidades! 🥳\n\n"
+       f"Por favor, póngase en contacto con el administrador @yordanisr para recibir su premio (puede elegir que se le transfiera vía PIX o que se le envíe a su familiar en Cuba). "
+       f"Una vez que reciba la transferencia, le pedimos por favor que haga una captura de pantalla y la envíe a este grupo como evidencia de que recibió su pago y que todo funciona con total transparencia."
+   )
+   await update.message.reply_text(msg_ganador, parse_mode="Markdown")
+
+   if ganador_id:
+       try:
+           msg_privado = (
+               f"🎉 *¡FELICIDADES {ganador_nombre}!* 🎉\n\n"
+               f"¡Has ganado Gran Sorteo 100 con tu número *{num_formateado}* llevándote un premio de *1000 reales*! 🏆\n\n"
+               f"Por favor, ponte en contacto con el administrador @yordanisr para recibir tu premio (puedes elegir transferencia vía PIX o envío a tu familiar en Cuba). "
+               f"Una vez que recibas la transferencia, haz una captura de pantalla y envíala al grupo como evidencia de que todo funciona con transparencia. 🤝"
+           )
+           await context.bot.send_message(chat_id=ganador_id, text=msg_privado, parse_mode="Markdown")
+       except Exception as e:
+           print(f"⚠️ No se pudo enviar mensaje privado al ganador: {e}")
+
+async def bienvenida_nuevos_usuarios(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   for nuevo_usuario in update.message.new_chat_members:
+       if nuevo_usuario.id == context.bot.id:
+           continue
+       
+       nombre = nuevo_usuario.first_name or "Amigo"
+       mencion = f"[{nombre}](tg://user?id={nuevo_usuario.id})"
+       
+       texto_bienvenida = (
+           f"🎯 *¡Bienvenido/a {mencion} a Gran Sorteo 100!* 🎟️\n\n"
+           f"Nos alegra mucho tenerte por aquí. Este es un espacio exclusivo y transparente para participar por grandes premios en efectivo.\n\n"
+           f"{TEXTO_REGLAS_OFICIAL}\n\n"
+           f"¡Mucha suerte y gracias por formar parte de *Gran Sorteo 100*! 🍀✨"
+       )
+       
+       try:
+           await update.message.reply_text(texto_bienvenida, parse_mode="Markdown")
+       except Exception as e:
+           print(f"Error enviando bienvenida: {e}")
+
+async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   if not update.message or not update.message.text:
+       return
+
+   mensaje_texto = update.message.text.strip()
+   comando = mensaje_texto.lower()
+   user = update.effective_user
+   user_id = user.id
+   nombre_usuario = user.first_name or "Usuario"
+   chat_id = update.effective_chat.id
+
+   data_rifa = obtener_data_completa()
+   rifa = data_rifa["numeros"]
+   solicitudes = data_rifa.get("solicitudes_pendientes", {})
+   estado_actual_rifa = data_rifa.get("estado_rifa", "activa")
+
+   if comando in ["hola", "buenas", "lista", "inicio", "rifa", "sorteo"]:
+       await update.message.reply_text(
+           f"¡Hola {nombre_usuario}! Estado actual de Gran Sorteo 100:\n\n{generar_texto_lista()}",
+           parse_mode="Markdown"
+       )
+       return
+
+   partes = [p.strip() for p in mensaje_texto.split(",")]
+   es_lista_numeros = all(p.isdigit() for p in partes) if partes else False
+
+   if es_lista_numeros:
+       if estado_actual_rifa == "finalizada":
+           await update.message.reply_text(
+               f"🔒 *Lo sentimos {nombre_usuario}, la lista está cerrada.* "
+               f"No se permite escoger números hasta que el administrador dé los resultados y proceda a resetear la lista.",
+               parse_mode="Markdown"
+           )
+           return
+       
+       if estado_actual_rifa == "bloqueada":
+           await update.message.reply_text(
+               f"⛔ *Lo sentimos {nombre_usuario}, la rifa se encuentra temporalmente bloqueada.* "
+               f"En este momento no se pueden apartar números hasta que el administrador la habilite nuevamente.",
+               parse_mode="Markdown"
+           )
+           return
+
+       ocupados, pendientes, validos_para_reservar, invalidos = [], [], [], []
+
+       for p in partes:
+           num_elegido = int(p)
+           if 1 <= num_elegido <= 100:
+               num_str = str(num_elegido)
+               info = rifa[num_str]
+               est = info.get("estado", "disponible")
+
+               if est == "ocupado":
+                   ocupados.append(f"*{num_str.zfill(2)}*")
+               elif est == "pendiente":
+                   pendientes.append(f"*{num_str.zfill(2)}*")
+               else:
+                   validos_para_reservar.append(num_str)
+           else:
+               invalidos.append(p)
+
+       mensajes_conflicto = []
+       if ocupados:
+           mensajes_conflicto.append(f"🔴 El/los número(s) {', '.join(ocupados)} ya está(n) *OCUPADO(S)*.")
+       if pendientes:
+           mensajes_conflicto.append(f"🟡 El/los número(s) {', '.join(pendientes)} está(n) *EN PROCESO DE VERIFICACIÓN*.")
+       if invalidos:
+           mensajes_conflicto.append(f"⚠️ El/los número(s) {', '.join(invalidos)} está(n) fuera del rango (1 al 100).")
+
+       if mensajes_conflicto and not validos_para_reservar:
+           await update.message.reply_text(f"Hola {nombre_usuario}:\n" + "\n".join(mensajes_conflicto), parse_mode="Markdown")
+           return
+
+       if validos_para_reservar:
+           req_id = "r" + str(uuid.uuid4().int)[:4]
+
+           for n in validos_para_reservar:
+               rifa[n]["estado"] = "pendiente"
+
+           solicitudes[req_id] = {
+               "nombre": nombre_usuario,
+               "user_id": user_id,
+               "username": user.username or "",
+               "numeros": validos_para_reservar,
+               "chat_origen": chat_id
+           }
+
+           data_rifa["numeros"] = rifa
+           data_rifa["solicitudes_pendientes"] = solicitudes
+           guardar_data_completa(data_rifa)
+
+           nums_solicitados_txt = ", ".join([n.zfill(2) for n in validos_para_reservar])
+
+           await update.message.reply_text(
+               f"⏳ *SOLICITUD EN PROCESO* ⏳\n\n"
+               f"Hola {nombre_usuario}, tus números (*{nums_solicitados_txt}*) están *reservados temporalmente*.\n\n"
+               f"Por favor, póngase en contacto con el administrador @yordanisr para realizar la transferencia de los 20 reales por número.",
+               parse_mode="Markdown"
+           )
+
+           keyboard = [
+               [
+                   InlineKeyboardButton("🟢 Confirmar Pago", callback_data=f"conf_{req_id}"),
+                   InlineKeyboardButton("🔴 Rechazar Pago", callback_data=f"rech_{req_id}")
+               ]
+           ]
+           reply_markup = InlineKeyboardMarkup(keyboard)
+
+           txt_admin = (
+               f"📥 *NUEVA SOLICITUD DE COMPRA* (ID: `{req_id}`)\n\n"
+               f"👤 *Cliente:* {nombre_usuario}\n"
+               f"💬 *Username:* @{user.username if user.username else 'Sin alias'}\n"
+               f"🎟️ *Números:* *{nums_solicitados_txt}*\n\n"
+               f"¿Deseas confirmar el pago?"
+           )
+
+           try:
+               await context.bot.send_message(
+                   chat_id=ADMIN_TELEGRAM_ID,
+                   text=txt_admin,
+                   reply_markup=reply_markup,
+                   parse_mode="Markdown"
+               )
+           except Exception as e:
+               print(f"Error enviando mensaje al admin: {e}")
+
+async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   query = update.callback_query
+   await query.answer()
+
+   if query.from_user.id != ADMIN_TELEGRAM_ID:
+       await query.edit_message_text("⛔ No estás autorizado.")
+       return
+
+   data_callback = query.data
+   accion, req_id = data_callback.split("_", 1)
+
+   data_rifa = obtener_data_completa()
+   rifa = data_rifa["numeros"]
+   solicitudes = data_rifa.get("solicitudes_pendientes", {})
+
+   if req_id not in solicitudes:
+       await query.edit_message_text(f"⚠️ La solicitud `{req_id}` ya fue procesada o no existe.", parse_mode="Markdown")
+       return
+
+   sol = solicitudes[req_id]
+   user_nombre = sol["nombre"]
+   user_id = sol["user_id"]
+   user_nums = sol["numeros"]
+   chat_origen = sol["chat_origen"]
+
+   nums_formatted = ", ".join([n.zfill(2) for n in user_nums])
+   usuario_mencion = f"[{user_nombre}](tg://user?id={user_id})"
+
+   if accion == "conf":
+       for n in user_nums:
+           rifa[n]["estado"] = "ocupado"
+           rifa[n]["nombre"] = user_nombre
+           rifa[n]["user_id"] = user_id
+
+       del solicitudes[req_id]
+       data_rifa["numeros"] = rifa
+       data_rifa["solicitudes_pendientes"] = solicitudes
+
+       lista_completa = all(rifa[str(n)]["estado"] == "ocupado" for n in range(1, 101))
+       if lista_completa:
+           data_rifa["estado_rifa"] = "finalizada"
+
+       guardar_data_completa(data_rifa)
+
+       await query.edit_message_text(f"✅ *Solicitud {req_id} APROBADA.* Números: {nums_formatted}", parse_mode="Markdown")
+
+       try:
+           msg_grupo = f"🎉 *¡PAGO CONFIRMADO!* 🎉\n\n👤 *Usuario:* {usuario_mencion}\n🎟️ *Números asignados:* *{nums_formatted}*\n\n¡Muchas felicidades! 🤝"
+           await context.bot.send_message(chat_id=chat_origen, text=msg_grupo, parse_mode="Markdown")
+       except Exception as e:
+           print(f"Error enviando aviso al grupo: {e}")
+
+       if lista_completa:
+           hora_actual = datetime.now().hour
+           if hora_actual < 21:
+               aviso_tiempo = "será **esta misma noche** en el tiro de la Florida"
+           else:
+               aviso_tiempo = "será **al día siguiente** en el tiro de la Florida de la noche"
+
+           msg_lista_llena = (
+               f"🚨 *¡ATENCIÓN COMUNIDAD!* 🚨\n\n"
+               f"🎟️ ¡Se han ocupado todos los números de la lista!\n"
+               f"🔒 La lista ha sido **bloqueada automáticamente** y permanecerá cerrada hasta que se dé el resultado y el administrador proceda a resetearla.\n\n"
+               f"🎯 El resultado {aviso_tiempo}. ¡Estén atentos! 🍀"
+           )
+           try:
+               await context.bot.send_message(chat_id=chat_origen, text=msg_lista_llena, parse_mode="Markdown")
+           except Exception as e:
+               print(f"Error enviando aviso de lista llena: {e}")
+
+       try:
+           msg_privado = f"✅ *¡PAGO APROBADO!* 🎉\n\nHola {user_nombre}, tu pago ha sido verificado. Tus números (*{nums_formatted}*) ya están registrados oficialmente a tu nombre en Gran Sorteo 100.\n\n¡Mucha suerte! 🍀"
+           await context.bot.send_message(chat_id=user_id, text=msg_privado, parse_mode="Markdown")
+       except Exception as e:
+           print(f"⚠️ No se pudo enviar privado de aprobación: {e}")
+
+   elif accion == "rech":
+       for n in user_nums:
+           rifa[n] = {"estado": "disponible", "nombre": "", "user_id": "", "username": ""}
+
+       del solicitudes[req_id]
+       data_rifa["numeros"] = rifa
+       data_rifa["solicitudes_pendientes"] = solicitudes
+       guardar_data_completa(data_rifa)
+
+       await query.edit_message_text(f"❌ *Solicitud {req_id} RECHAZADA.*", parse_mode="Markdown")
+
+       try:
+           msg_cancel_grupo = f"⚠️ *SOLICITUD RECHAZADA* ⚠️\n\nEl pago de {usuario_mencion} para el/los número(s) *{nums_formatted}* no pudo ser verificado. Los números vuelven a estar 🟢 *Disponibles*."
+           await context.bot.send_message(chat_id=chat_origen, text=msg_cancel_grupo, parse_mode="Markdown")
+       except Exception as e:
+           print(f"Error notificando rechazo en grupo: {e}")
+
+       try:
+           msg_cancel_privado = f"❌ *SOLICITUD RECHAZADA* ❌\n\nHola {user_nombre}, lamentablemente tu pago para el/los número(s) *{nums_formatted}* fue rechazado y los números han sido liberados nuevamente."
+           await context.bot.send_message(chat_id=user_id, text=msg_cancel_privado, parse_mode="Markdown")
+       except Exception as e:
+           print(f"⚠️ No se pudo enviar privado de rechazo: {e}")
+
+async def main():
+   inicializar_rifa()
+    
+   await start_web_server()
+
+   app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+   app.add_handler(CommandHandler("start", start_command))
+   app.add_handler(CommandHandler("reglas", reglas_command))
+   app.add_handler(CommandHandler("bloquear", bloquear_command))
+   app.add_handler(CommandHandler("desbloquear", desbloquear_command))
+   app.add_handler(CommandHandler("reset", reset_command))
+   app.add_handler(CommandHandler("ganador", ganador_command))
+   app.add_handler(CommandHandler("liberar", liberar_command))
+   app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, bienvenida_nuevos_usuarios))
+   app.add_handler(CallbackQueryHandler(boton_callback))
+   app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
+
+   print("🤖 Bot de Gran Sorteo 100 iniciado correctamente...")
+   await app.initialize()
+   await app.start()
+   await app.updater.start_polling()
+
+   await asyncio.Event().wait()
+
+if __name__ == "__main__":
+   asyncio.run(main())
+
+
+
+
+
+
+
+Codigo nuevo ok con promocion
+
+
+import os
+import json
+import uuid
+import asyncio
+from datetime import datetime
+from aiohttp import web
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+
+# --- SERVIDOR WEB PARA CUMPLIR CON EL PUERTO DE RENDER ---
+async def handle_web(request):
+    return web.Response(text="Bot de Rifa Activo y en Línea 24/7!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_web)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"🌐 Servidor web corriendo en el puerto {port}")
+# ---------------------------------------------------------
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+ADMIN_TELEGRAM_ID = int(os.environ.get("ADMIN_TELEGRAM_ID", "0"))
+
+DB_FILE = "rifa_db.json"
+
+def inicializar_rifa():
+    try:
+        if not os.path.exists(DB_FILE):
+            data_inicial = {
+                "estado_rifa": "activa",
+                "numeros": {str(i): {"estado": "disponible", "nombre": "", "user_id": "", "username": ""} for i in range(1, 101)},
+                "solicitudes_pendientes": {}
+            }
+            with open(DB_FILE, "w") as f:
+                json.dump(data_inicial, f, indent=4)
+    except Exception as e:
+        print(f"Error al inicializar JSON: {e}")
+
+def borrar_y_recrear_base_datos():
+    try:
+        if os.path.exists(DB_FILE):
+            os.remove(DB_FILE)
+    except Exception as e:
+        print(f"Error al eliminar archivo: {e}")
+    inicializar_rifa()
+
+def obtener_data_completa():
+    inicializar_rifa()
+    try:
+        with open(DB_FILE, "r") as f:
+            data = json.load(f)
+            if "estado_rifa" not in data:
+                data["estado_rifa"] = "activa"
+            if "solicitudes_pendientes" not in data:
+                data["solicitudes_pendientes"] = {}
+            return data
+    except Exception as e:
+        borrar_y_recrear_base_datos()
+        with open(DB_FILE, "r") as f:
+            return json.load(f)
+
+def guardar_data_completa(data):
+    try:
+        with open(DB_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Error al guardar JSON: {e}")
+
+# --- VALOR DE CADA NÚMERO Y CÁLCULO AUTOMÁTICO DEL PREMIO (55%) ---
+VALOR_POR_NUMERO = 10
+
+def calcular_premio_total():
+    recaudacion_total = 100 * VALOR_POR_NUMERO
+    premio = recaudacion_total * 0.55
+    # Si el resultado es entero, lo mostramos sin decimales molestos
+    if premio.is_integer():
+        return int(premio)
+    return round(premio, 2)
+# -----------------------------------------------------------------
+
+def calcular_precio_total(cantidad, usuario_ya_tiene_compras=False):
+    if cantidad <= 0:
+        return 0
+    
+    if usuario_ya_tiene_compras:
+        return cantidad * VALOR_POR_NUMERO
+
+    total = 0
+    restantes = cantidad
+
+    # Paquete de 5 números con descuento promocional proporcional
+    p5 = int(VALOR_POR_NUMERO * 4)
+    p4 = int(VALOR_POR_NUMERO * 3.5)
+    p3 = int(VALOR_POR_NUMERO * 2.5)
+    p2 = int(VALOR_POR_NUMERO * 1.5)
+    p1 = VALOR_POR_NUMERO
+
+    if restantes >= 5:
+        total += p5
+        restantes -= 5
+    else:
+        if restantes == 4:
+            return p4
+        elif restantes == 3:
+            return p3
+        elif restantes == 2:
+            return p2
+        elif restantes == 1:
+            return p1
+
+    if restantes > 0:
+        total += restantes * VALOR_POR_NUMERO
+
+    return total
+
+def usuario_tiene_jugada_previa(user_id, data_completa):
+    rifa = data_completa.get("numeros", {})
+    solicitudes = data_completa.get("solicitudes_pendientes", {})
+    
+    for num_str, info in rifa.items():
+        if info.get("user_id") == user_id and info.get("estado") in ["ocupado", "pendiente"]:
+            return True
+            
+    for req_id, sol in solicitudes.items():
+        if sol.get("user_id") == user_id:
+            return True
+            
+    return False
+
+def generar_texto_lista():
+    data = obtener_data_completa()
+    rifa = data["numeros"]
+    texto = "🎟️ *LISTA OFICIAL DE LA RIFA (1 al 100)* 🎟️\n\n"
+    disponibles = 0
+    for i in range(1, 101):
+        num_str = str(i).zfill(2)
+        info = rifa[str(i)]
+        estado = info.get("estado", "disponible")
+  
+        if estado == "disponible":
+            texto += f"🟢 *{num_str}*: Disponible\n"
+            disponibles += 1
+        elif estado == "pendiente":
+            texto += f"🟡 *{num_str}*: En verificación de pago...\n"
+        else:
+            nombre = info.get("nombre", "Usuario")
+            user_id = info.get("user_id")
+            if user_id:
+                texto += f"🔴 *{num_str}*: Ocupado por [{nombre}](tg://user?id={user_id})\n"
+            else:
+                texto += f"🔴 *{num_str}*: Ocupado por {nombre}\n"
+             
+    texto += f"\n📊 *Resumen:* Quedan {disponibles} números disponibles."
+    estado_actual = data.get("estado_rifa")
+    if estado_actual == "finalizada":
+        texto += "\n\n🔒 *ESTADO:* Rifa cerrada/finalizada."
+    elif estado_actual == "bloqueada":
+        texto += "\n\n⛔ *ESTADO:* Rifa temporalmente bloqueada por el administrador."
+    return texto
+
+def obtener_texto_reglas():
+    premio_actual = calcular_premio_total()
+    return (
+        "📌 *REGLAS Y DINÁMICA DEL GRUPO (Gran Sorteo 100):*\n\n"
+        "1️⃣ *Respeto:* Mantén un ambiente de respeto absoluto hacia todos los miembros de la comunidad y administradores.\n"
+        "2️⃣ *Números y Promoción:* Disponemos de 100 números (del 01 al 100).\n"
+        f"✨ *Valores para tu primera jugada (Promoción):*\n"
+        f"• 1 número = *{VALOR_POR_NUMERO} reales*\n"
+        f"• 2 números = *{int(VALOR_POR_NUMERO * 1.5)} reales*\n"
+        f"• 3 números = *{int(VALOR_POR_NUMERO * 2.5)} reales*\n"
+        f"• 4 números = *{int(VALOR_POR_NUMERO * 3.5)} reales*\n"
+        f"• 5 números = *{int(VALOR_POR_NUMERO * 4)} reales*\n"
+        f"*(Si pides más de 5 números en tu primera jugada, los primeros 5 tienen precio promocional y a partir del 6to número cada uno cuesta exactamente {VALOR_POR_NUMERO} reales).* \n\n"
+        f"⚠️ *¡Atención a las jugadas adicionales!* La promoción de paquetes aplica **únicamente para la primera jugada** de cada usuario. A partir de tu segunda jugada (incluso si mandas 2, 3, 4 o más números), **cada número tiene un costo fijo de {VALOR_POR_NUMERO} reales**, ya que no entra en la promoción.\n\n"
+        "Envía la palabra `lista` para ver los disponibles y escribe los que deseas separados por coma (ej: *7, 14*) aquí o en el grupo.\n"
+        "3️⃣ *Condición del Sorteo:* El sorteo se realizará **únicamente cuando los 100 números estén 100% ocupados y pagados**.\n"
+        "4️⃣ *Garantía de Devolución:* Si algún participante adquiere sus números pero **no desea esperar**, puede solicitar la **devolución íntegra de su dinero** con el administrador (@yordanisr).\n"
+        f"5️⃣ *Entrega del Premio:* El usuario ganador recibirá un premio de *{premio_actual} reales* (vía PIX o en Cuba en CUP a su familiar mediante la tasa del grupo de remesas). Grupo de WhatsApp obligatorio para tasa: https://chat.whatsapp.com/HEaEIKaEjksJRrWEKcIVEo?s=sh&p=a&ilr=0.\n"
+        "6️⃣ *Transparencia:* El ganador se define utilizando los resultados oficiales de la *Lotería de Florida* (Pick 3) en el horario nocturno.\n\n"
+        "🤝 *¡Ayúdanos a crecer!* Enlace de invitación al grupo: https://t.me/+didZDftOZAhmZjdh"
+    )
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    nombre = user.first_name or "Participante"
+    mencion = f"[{nombre}](tg://user?id={user.id})"
+    data_rifa = obtener_data_completa()
+    estado_actual_rifa = data_rifa.get("estado_rifa", "activa")
+
+    respuesta = (
+        f"¡Hola {mencion}! Estado actual de Gran Sorteo 100. ✨\n\n"
+        f"{generar_texto_lista()}"
+    )
+    if estado_actual_rifa == "activa":
+        respuesta += "\n\n👉 *¿Cómo comprar?* Envía los números que deseas separados por coma (ej: *7, 14*) aquí o en el grupo."
+     
+    await update.message.reply_text(respuesta, parse_mode="Markdown")
+
+async def reglas_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mensaje_reglas = f"🎯 *REGLAS OFICIALES - Gran Sorteo 100* 🎟️\n\n{obtener_texto_reglas()}"
+    await update.message.reply_text(mensaje_reglas, parse_mode="Markdown")
+
+async def bloquear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_TELEGRAM_ID:
+        await update.message.reply_text("⛔ No estás autorizado para bloquear la rifa.")
+        return
+
+    data_rifa = obtener_data_completa()
+    data_rifa["estado_rifa"] = "bloqueada"
+    guardar_data_completa(data_rifa)
+
+    await update.message.reply_text("⛔ *La rifa ha sido bloqueada temporalmente.*", parse_mode="Markdown")
+
+async def desbloquear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_TELEGRAM_ID:
+        await update.message.reply_text("⛔ No estás autorizado para desbloquear la rifa.")
+        return
+
+    data_rifa = obtener_data_completa()
+    if data_rifa.get("estado_rifa") == "finalizada":
+        await update.message.reply_text("⚠️ La rifa se encuentra finalizada. Usa `/reset` para reiniciar.", parse_mode="Markdown")
+        return
+
+    data_rifa["estado_rifa"] = "activa"
+    guardar_data_completa(data_rifa)
+
+    await update.message.reply_text("🟢 *La rifa ha sido desbloqueada.*\n\n" + generar_texto_lista(), parse_mode="Markdown")
+
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_TELEGRAM_ID:
+        await update.message.reply_text("⛔ No estás autorizado para resetear el sorteo.")
+        return
+     
+    borrar_y_recrear_base_datos()
+    await update.message.reply_text("🔄 *¡Gran Sorteo 100 ha sido reseteado con éxito!*\n\n" + generar_texto_lista(), parse_mode="Markdown")
+
+async def liberar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_TELEGRAM_ID:
+        await update.message.reply_text("⛔ No estás autorizado para liberar números.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ Por favor indica el nombre del usuario a liberar. Ejemplo: `/liberar Juan`", parse_mode="Markdown")
+        return
+
+    nombre_buscar = " ".join(context.args).strip().lower()
+    data_rifa = obtener_data_completa()
+    rifa = data_rifa["numeros"]
+
+    numeros_liberados = []
+    for num_str, info in rifa.items():
+        if info.get("estado") == "ocupado":
+            nombre_usuario_reg = info.get("nombre", "").lower()
+            if nombre_buscar in nombre_usuario_reg:
+                numeros_liberados.append(num_str.zfill(2))
+                rifa[num_str] = {"estado": "disponible", "nombre": "", "user_id": "", "username": ""}
+
+    if not numeros_liberados:
+        await update.message.reply_text(f"⚠️ No se encontraron números ocupados para: *{nombre_buscar}*.", parse_mode="Markdown")
+        return
+
+    if data_rifa.get("estado_rifa") == "finalizada":
+        data_rifa["estado_rifa"] = "activa"
+
+    data_rifa["numeros"] = rifa
+    guardar_data_completa(data_rifa)
+
+    nums_str_lib = ", ".join(numeros_liberados)
+    await update.message.reply_text(f"🔄 Números *{nums_str_lib}* liberados con éxito.", parse_mode="Markdown")
+
+async def ganador_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_TELEGRAM_ID:
+        await update.message.reply_text("⛔ No estás autorizado.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ Indica el número ganador. Ejemplo: `/ganador 14`", parse_mode="Markdown")
+        return
+
+    num_ingresado = context.args[0].strip()
+    if not num_ingresado.isdigit() or not (1 <= int(num_ingresado) <= 100):
+        await update.message.reply_text("⚠️ El número debe estar entre 1 y 100.", parse_mode="Markdown")
+        return
+
+    num_str = str(int(num_ingresado))
+    data_rifa = obtener_data_completa()
+    info_num = data_rifa["numeros"].get(num_str, {})
+
+    if info_num.get("estado") != "ocupado":
+        await update.message.reply_text(f"⚠️ El número *{num_ingresado.zfill(2)}* no está ocupado.", parse_mode="Markdown")
+        return
+
+    ganador_nombre = info_num.get("nombre")
+    ganador_id = info_num.get("user_id")
+    num_formateado = num_str.zfill(2)
+    
+    ganador_mencion = f"[{ganador_nombre}](tg://user?id={ganador_id})" if ganador_id else ganador_nombre
+    premio_actual = calcular_premio_total()
+
+    data_rifa["estado_rifa"] = "finalizada"
+    guardar_data_completa(data_rifa)
+
+    await update.message.reply_text(
+        f"🎯 *¡RESULTADO OFICIAL DE LA LOTERÍA!* 🎯\n\n"
+        f"El número ganador de la Florida Pick 3 es el: *{num_formateado}*",
+        parse_mode="Markdown"
+    )
+
+    await update.message.reply_text(
+        f"🎉 *¡Felicidades al Ganador!* 🎉\n\n"
+        f"El usuario {ganador_mencion} ha ganado con el número {num_formateado} un premio de {premio_actual} reales. ¡Muchas felicidades! 🥳\n\n"
+        f"Por favor, póngase en contacto con el administrador @yordanisr para recibir su premio (puede elegir que se le transfiera vía PIX o que se le envíe a su familiar en Cuba). Una vez que reciba la transferencia, le pedimos por favor que haga una captura de pantalla y la envíe a este grupo como evidencia de que recibió su pago y que todo funciona con total transparencia.",
+        parse_mode="Markdown"
+    )
+
+async def bienvenida_nuevos_usuarios(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for nuevo_usuario in update.message.new_chat_members:
+        if nuevo_usuario.id == context.bot.id:
+            continue
+        nombre = nuevo_usuario.first_name or "Amigo"
+        mencion = f"[{nombre}](tg://user?id={nuevo_usuario.id})"
+        texto_bienvenida = f"🎯 *¡Bienvenido/a {mencion} a Gran Sorteo 100!* 🎟️\n\n{obtener_texto_reglas()}"
+        try:
+            await update.message.reply_text(texto_bienvenida, parse_mode="Markdown")
+        except Exception as e:
+            print(f"Error enviando bienvenida: {e}")
+
+async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
+    mensaje_texto = update.message.text.strip()
+    comando = mensaje_texto.lower()
+    user = update.effective_user
+    user_id = user.id
+    nombre_usuario = user.first_name or "Usuario"
+    
+    usuario_mencion = f"[{nombre_usuario}](tg://user?id={user_id})"
+    chat_id = update.effective_chat.id
+
+    data_rifa = obtener_data_completa()
+    rifa = data_rifa["numeros"]
+    solicitudes = data_rifa.get("solicitudes_pendientes", {})
+    estado_actual_rifa = data_rifa.get("estado_rifa", "activa")
+
+    if comando in ["hola", "buenas", "lista", "inicio", "rifa", "sorteo"]:
+        await update.message.reply_text(
+            f"¡Hola {usuario_mencion}! Estado actual de Gran Sorteo 100:\n\n{generar_texto_lista()}",
+            parse_mode="Markdown"
+        )
+        return
+
+    partes = [p.strip() for p in mensaje_texto.split(",")]
+    es_lista_numeros = all(p.isdigit() for p in partes) if partes else False
+
+    if es_lista_numeros:
+        if estado_actual_rifa in ["finalizada", "bloqueada"]:
+            await update.message.reply_text(f"⛔ Lo sentimos, la lista se encuentra cerrada o bloqueada en este momento.", parse_mode="Markdown")
+            return
+
+        ocupados, pendientes, validos_para_reservar, invalidos = [], [], [], []
+
+        for p in partes:
+            num_elegido = int(p)
+            if 1 <= num_elegido <= 100:
+                num_str = str(num_elegido)
+                est = rifa[num_str].get("estado", "disponible")
+                if est == "ocupado":
+                    ocupados.append(f"*{num_str.zfill(2)}*")
+                elif est == "pendiente":
+                    pendientes.append(f"*{num_str.zfill(2)}*")
+                else:
+                    validos_para_reservar.append(num_str)
+            else:
+                invalidos.append(p)
+
+        if validos_para_reservar:
+            ya_tiene_compras = usuario_tiene_jugada_previa(user_id, data_rifa)
+
+            req_id = "r" + str(uuid.uuid4().int)[:4]
+            for n in validos_para_reservar:
+                rifa[n]["estado"] = "pendiente"
+
+            solicitudes[req_id] = {
+                "nombre": nombre_usuario,
+                "user_id": user_id,
+                "username": user.username or "",
+                "numeros": validos_para_reservar,
+                "chat_origen": chat_id
+            }
+
+            data_rifa["numeros"] = rifa
+            data_rifa["solicitudes_pendientes"] = solicitudes
+            guardar_data_completa(data_rifa)
+
+            nums_solicitados_txt = ", ".join([n.zfill(2) for n in validos_para_reservar])
+            cantidad_numeros = len(validos_para_reservar)
+            
+            total_a_pagar = calcular_precio_total(cantidad_numeros, usuario_ya_tiene_compras=ya_tiene_compras)
+
+            if ya_tiene_compras:
+                aviso_promocion = f"\n⚠️ *Aviso importante:* Como ya tienes una jugada previa registrada, esta nueva jugada de {cantidad_numeros} número(s) **no aplica para la promoción** y se cobra a precio estándar (*{VALOR_POR_NUMERO} reales cada número*).\n"
+            else:
+                aviso_promocion = f"\n✨ *¡Primera jugada detectada!* Aplica la tarifa promocional para tus {cantidad_numeros} número(s).\n"
+
+            await update.message.reply_text(
+                f"⏳ *SOLICITUD EN PROCESO* ⏳\n\n"
+                f"Hola {usuario_mencion}, tus números (*{nums_solicitados_txt}*) están reservados temporalmente.\n"
+                f"{aviso_promocion}"
+                f"💰 Cantidad: *{cantidad_numeros}*\n"
+                f"💵 Total a transferir: *{total_a_pagar} reales*\n\n"
+                f"Contacta al administrador @yordanisr para pagar.",
+                parse_mode="Markdown"
+            )
+
+            keyboard = [[
+                InlineKeyboardButton("🟢 Confirmar Pago", callback_data=f"conf_{req_id}"),
+                InlineKeyboardButton("🔴 Rechazar Pago", callback_data=f"rech_{req_id}")
+            ]]
+            
+            txt_admin = (
+                f"📥 *NUEVA SOLICITUD* (ID: `{req_id}`)\n\n"
+                f"👤 *Cliente:* {usuario_mencion} {'*(Jugada Posterior - Precio Normal)*' if ya_tiene_compras else '*(1era Jugada - Promoción)*'}\n"
+                f"🎟️ *Números:* *{nums_solicitados_txt}*\n"
+                f"💵 *Total:* *{total_a_pagar} reales* ({cantidad_numeros} núm.)"
+            )
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_TELEGRAM_ID,
+                    text=txt_admin,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                print(f"Error enviando mensaje al admin: {e}")
+
+async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id != ADMIN_TELEGRAM_ID:
+        await query.edit_message_text("⛔ No estás autorizado.")
+        return
+
+    data_callback = query.data
+    accion, req_id = data_callback.split("_", 1)
+
+    data_rifa = obtener_data_completa()
+    rifa = data_rifa["numeros"]
+    solicitudes = data_rifa.get("solicitudes_pendientes", {})
+
+    if req_id not in solicitudes:
+        await query.edit_message_text(f"⚠️ La solicitud `{req_id}` ya fue procesada.", parse_mode="Markdown")
+        return
+
+    sol = solicitudes[req_id]
+    user_nombre = sol["nombre"]
+    user_id = sol["user_id"]
+    user_nums = sol["numeros"]
+    chat_origen = sol["chat_origen"]
+    nums_formatted = ", ".join([n.zfill(2) for n in user_nums])
+
+    user_mencion = f"[{user_nombre}](tg://user?id={user_id})"
+
+    if accion == "conf":
+        for n in user_nums:
+            rifa[n]["estado"] = "ocupado"
+            rifa[n]["nombre"] = user_nombre
+            rifa[n]["user_id"] = user_id
+
+        del solicitudes[req_id]
+        data_rifa["numeros"] = rifa
+        data_rifa["solicitudes_pendientes"] = solicitudes
+
+        if all(rifa[str(n)]["estado"] == "ocupado" for n in range(1, 101)):
+            data_rifa["estado_rifa"] = "finalizada"
+
+        guardar_data_completa(data_rifa)
+        await query.edit_message_text(f"✅ *Aprobado.* Números: {nums_formatted}", parse_mode="Markdown")
+
+        texto_pago_confirmado = (
+            f"🎉 *¡PAGO CONFIRMADO!* 🎉\n\n"
+            f"👤 *Usuario:* {user_mencion}\n"
+            f"🎟️ *Números asignados:* {nums_formatted}\n\n"
+            f"¡Muchas felicidades! 🤝"
+        )
+
+        try:
+            await context.bot.send_message(chat_id=chat_origen, text=texto_pago_confirmado, parse_mode="Markdown")
+            await context.bot.send_message(chat_id=user_id, text=texto_pago_confirmado, parse_mode="Markdown")
+        except Exception as e:
+            print(f"Error notificando aprobación: {e}")
+
+    elif accion == "rech":
+        for n in user_nums:
+            rifa[n] = {"estado": "disponible", "nombre": "", "user_id": "", "username": ""}
+
+        del solicitudes[req_id]
+        data_rifa["numeros"] = rifa
+        data_rifa["solicitudes_pendientes"] = solicitudes
+        guardar_data_completa(data_rifa)
+        await query.edit_message_text(f"❌ *Rechazado.*", parse_mode="Markdown")
+
+        try:
+            await context.bot.send_message(chat_id=user_id, text=f"❌ Tu solicitud para los números *{nums_formatted}* fue rechazada.", parse_mode="Markdown")
+        except Exception as e:
+            print(f"Error notificando rechazo: {e}")
+
+async def main():
+    inicializar_rifa()
+    
+    await start_web_server()
+
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("reglas", reglas_command))
+    app.add_handler(CommandHandler("bloquear", bloquear_command))
+    app.add_handler(CommandHandler("desbloquear", desbloquear_command))
+    app.add_handler(CommandHandler("reset", reset_command))
+    app.add_handler(CommandHandler("ganador", ganador_command))
+    app.add_handler(CommandHandler("liberar", liberar_command))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, bienvenida_nuevos_usuarios))
+    app.add_handler(CallbackQueryHandler(boton_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
+
+    print("🤖 Bot de Gran Sorteo 100 iniciado correctamente...")
+    
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+
+    stop_signal = asyncio.Event()
+    await stop_signal.wait()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        print("Bot detenido correctamente.")
