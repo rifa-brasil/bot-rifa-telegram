@@ -36,12 +36,12 @@ DB_FILE = "database.db"
 
 if not TELEGRAM_TOKEN:
     raise ValueError(
-        "❌ No se encontró la variable TELEGRAM_TOKEN."
+        "❌ No se encontró TELEGRAM_TOKEN."
     )
 
 if not ADMIN_TELEGRAM_ID:
     raise ValueError(
-        "❌ No se encontró la variable ADMIN_TELEGRAM_ID."
+        "❌ No se encontró ADMIN_TELEGRAM_ID."
     )
 
 try:
@@ -53,10 +53,19 @@ except ValueError:
 
 
 # =========================================================
-# SERVIDOR WEB PARA RENDER
+# COMPROBAR ADMIN
+# =========================================================
+
+def es_admin(user_id):
+    return user_id == ADMIN_TELEGRAM_ID
+
+
+# =========================================================
+# SERVIDOR WEB
 # =========================================================
 
 async def handle_web(request):
+
     return web.Response(
         text="Bot de Trading Activo y en Línea 24/7!"
     )
@@ -249,16 +258,7 @@ def obtener_usuario(telegram_id):
 
 
 # =========================================================
-# COMPROBAR ADMINISTRADOR
-# =========================================================
-
-def es_admin(user_id):
-
-    return user_id == ADMIN_TELEGRAM_ID
-
-
-# =========================================================
-# MENÚ PRINCIPAL DE USUARIOS
+# MENÚ PRINCIPAL DEL USUARIO
 # =========================================================
 
 def crear_menu_principal():
@@ -284,6 +284,7 @@ def crear_menu_principal():
                 "💰 Depositar",
                 callback_data="depositar"
             ),
+
             InlineKeyboardButton(
                 "💸 Retirar",
                 callback_data="retirar"
@@ -319,7 +320,7 @@ def crear_menu_principal():
 
 
 # =========================================================
-# MENÚ ADMINISTRADOR
+# MENÚ EXCLUSIVO DEL ADMINISTRADOR
 # =========================================================
 
 def crear_menu_admin():
@@ -400,30 +401,24 @@ async def admin_command(
 
     user = update.effective_user
 
-    # -----------------------------------------------------
-    # BLOQUEAR USUARIOS NORMALES
-    # -----------------------------------------------------
+    # NUNCA mostrar información administrativa
+    # a usuarios normales.
 
     if not es_admin(user.id):
+
+        print(
+            f"⚠️ Intento de acceso admin: {user.id}"
+        )
 
         await update.message.reply_text(
             "⛔ Comando no disponible."
         )
 
-        print(
-            f"⚠️ Intento de acceso administrativo: "
-            f"{user.id}"
-        )
-
         return
-
-    # -----------------------------------------------------
-    # PANEL ADMIN
-    # -----------------------------------------------------
 
     texto = (
         "🔐 *PANEL DE ADMINISTRADOR*\n\n"
-        "Bienvenido al área administrativa.\n\n"
+        "Esta sección es privada.\n\n"
         "Selecciona una opción:"
     )
 
@@ -496,16 +491,15 @@ async def mostrar_cuenta(
 
 
 # =========================================================
-# INFORMACIÓN DEL SISTEMA PARA ADMIN
+# ESTADO DEL SISTEMA
 # =========================================================
 
 def obtener_estado_sistema():
 
-    if not os.path.exists(
-        DB_FILE
-    ):
+    if not os.path.exists(DB_FILE):
 
         return (
+            "📊 *ESTADO DEL SISTEMA*\n\n"
             "🔴 Base de datos no encontrada."
         )
 
@@ -531,32 +525,48 @@ def obtener_estado_sistema():
         "📊 *ESTADO DEL SISTEMA*\n\n"
         "🟢 Bot funcionando\n"
         "🟢 Base de datos funcionando\n\n"
-        f"👥 Usuarios registrados: "
-        f"*{usuarios}*\n"
+        f"👥 Usuarios registrados: *{usuarios}*\n"
         f"🗄️ Base de datos: `{DB_FILE}`\n"
         f"📦 Tamaño: `{tamaño} bytes`"
     )
 
 
 # =========================================================
-# CREAR BACKUP
+# BACKUP EXCLUSIVO DEL ADMIN
 # =========================================================
 
 async def crear_backup(
-    chat_id,
+    admin_id,
     context
 ):
 
-    if not os.path.exists(
-        DB_FILE
-    ):
+    # -----------------------------------------------------
+    # SEGURIDAD
+    # -----------------------------------------------------
+
+    if not es_admin(admin_id):
+
+        print(
+            f"🚨 Intento de backup no autorizado: "
+            f"{admin_id}"
+        )
+
+        return
+
+
+    # -----------------------------------------------------
+    # COMPROBAR BASE DE DATOS
+    # -----------------------------------------------------
+
+    if not os.path.exists(DB_FILE):
 
         await context.bot.send_message(
-            chat_id=chat_id,
+            chat_id=ADMIN_TELEGRAM_ID,
             text="❌ No se encontró la base de datos."
         )
 
         return
+
 
     fecha = datetime.now().strftime(
         "%Y-%m-%d_%H-%M-%S"
@@ -566,11 +576,12 @@ async def crear_backup(
         f"database_backup_{fecha}.db"
     )
 
+
     try:
 
         print(
-            f"📦 Creando respaldo: "
-            f"{backup_file}"
+            f"📦 Creando backup para administrador "
+            f"{ADMIN_TELEGRAM_ID}"
         )
 
         shutil.copy2(
@@ -590,6 +601,12 @@ async def crear_backup(
             backup_file
         )
 
+
+        # -------------------------------------------------
+        # IMPORTANTE:
+        # EL ARCHIVO SOLO SE ENVÍA AL ADMINISTRADOR
+        # -------------------------------------------------
+
         with open(
             backup_file,
             "rb"
@@ -597,7 +614,7 @@ async def crear_backup(
 
             await context.bot.send_document(
 
-                chat_id=chat_id,
+                chat_id=ADMIN_TELEGRAM_ID,
 
                 document=archivo,
 
@@ -609,36 +626,50 @@ async def crear_backup(
                     f"📁 Archivo: `{backup_file}`\n"
                     f"📦 Tamaño: `{tamaño} bytes`\n"
                     f"📅 Fecha: `{fecha}`\n\n"
-                    "🔐 Guarda este archivo "
-                    "en un lugar seguro."
+                    "🔐 Este respaldo es privado."
                 ),
 
                 parse_mode="Markdown"
             )
 
+
         print(
-            "✅ Backup enviado correctamente."
+            "✅ Backup enviado exclusivamente "
+            "al administrador."
         )
+
 
     except Exception as e:
 
         error = str(e)
 
         print(
-            f"❌ ERROR REAL DEL BACKUP: {error}"
+            f"❌ ERROR DEL BACKUP: {error}"
         )
 
-        await context.bot.send_message(
+        # El error también va SOLO al administrador.
 
-            chat_id=chat_id,
+        try:
 
-            text=(
-                "❌ *Error al crear el respaldo.*\n\n"
-                f"🔎 Error real:\n`{error}`"
-            ),
+            await context.bot.send_message(
 
-            parse_mode="Markdown"
-        )
+                chat_id=ADMIN_TELEGRAM_ID,
+
+                text=(
+                    "❌ *Error al crear el respaldo.*\n\n"
+                    f"🔎 Error:\n`{error}`"
+                ),
+
+                parse_mode="Markdown"
+            )
+
+        except Exception as error_envio:
+
+            print(
+                f"❌ Error enviando mensaje al admin: "
+                f"{error_envio}"
+            )
+
 
     finally:
 
@@ -653,8 +684,7 @@ async def crear_backup(
                 )
 
                 print(
-                    f"🗑️ Copia temporal eliminada: "
-                    f"{backup_file}"
+                    "🗑️ Copia temporal eliminada."
                 )
 
             except Exception as e:
@@ -676,13 +706,48 @@ async def boton_callback(
 
     query = update.callback_query
 
-    await query.answer()
-
     user = query.from_user
 
-    registrar_usuario(user)
-
     accion = query.data
+
+
+    # =====================================================
+    # PROTECCIÓN ADMINISTRATIVA PRIMERO
+    # =====================================================
+
+    if accion.startswith("admin_"):
+
+        # -------------------------------------------------
+        # SI NO ES ADMIN:
+        # NO EJECUTAR NADA ADMINISTRATIVO
+        # -------------------------------------------------
+
+        if not es_admin(user.id):
+
+            print(
+                f"🚨 Callback admin bloqueado: "
+                f"user={user.id}, "
+                f"accion={accion}"
+            )
+
+            await query.answer(
+                "⛔ No tienes permiso.",
+                show_alert=True
+            )
+
+            return
+
+
+    # =====================================================
+    # AHORA SÍ RESPONDER AL CALLBACK
+    # =====================================================
+
+    await query.answer()
+
+
+    # Registrar únicamente al usuario que está interactuando.
+
+    registrar_usuario(user)
 
 
     # =====================================================
@@ -706,7 +771,7 @@ async def boton_callback(
 
 
     # =====================================================
-    # CUENTA
+    # MI CUENTA
     # =====================================================
 
     if accion == "cuenta":
@@ -914,30 +979,29 @@ async def boton_callback(
 
 
     # =====================================================
-    # PROTECCIÓN ADMINISTRATIVA
+    # PANEL ADMIN
     # =====================================================
-    #
-    # MUY IMPORTANTE:
-    # Aunque un usuario normal intente fabricar
-    # manualmente un callback como "admin_usuarios",
-    # "admin_backup" o "admin_status", será bloqueado.
-    #
 
-    if accion.startswith("admin_"):
+    if accion == "admin_inicio":
+
+        # Esta comprobación es obligatoria.
 
         if not es_admin(user.id):
-
-            await query.answer(
-                "⛔ No tienes permiso.",
-                show_alert=True
-            )
-
-            print(
-                f"⚠️ Intento de acceso admin "
-                f"por usuario: {user.id}"
-            )
-
             return
+
+        texto = (
+            "🔐 *PANEL DE ADMINISTRADOR*\n\n"
+            "Esta sección es privada.\n\n"
+            "Selecciona una opción:"
+        )
+
+        await query.edit_message_text(
+            texto,
+            reply_markup=crear_menu_admin(),
+            parse_mode="Markdown"
+        )
+
+        return
 
 
     # =====================================================
@@ -995,12 +1059,19 @@ async def boton_callback(
         if not es_admin(user.id):
             return
 
+        # -------------------------------------------------
+        # ESTE MENSAJE SE EDITA EN EL CHAT PRIVADO
+        # DEL ADMINISTRADOR.
+        # -------------------------------------------------
+
         await query.edit_message_text(
-            "📦 Preparando respaldo de la base de datos..."
+            "📦 Preparando respaldo..."
         )
 
+        # El backup SIEMPRE utiliza el ID del administrador.
+
         await crear_backup(
-            user.id,
+            ADMIN_TELEGRAM_ID,
             context
         )
 
@@ -1008,7 +1079,7 @@ async def boton_callback(
 
 
     # =====================================================
-    # ADMIN - STATUS
+    # ADMIN - ESTADO
     # =====================================================
 
     if accion == "admin_status":
@@ -1036,29 +1107,6 @@ async def boton_callback(
         return
 
 
-    # =====================================================
-    # VOLVER AL PANEL ADMIN
-    # =====================================================
-
-    if accion == "admin_inicio":
-
-        if not es_admin(user.id):
-            return
-
-        texto = (
-            "🔐 *PANEL DE ADMINISTRADOR*\n\n"
-            "Selecciona una opción:"
-        )
-
-        await query.edit_message_text(
-            texto,
-            reply_markup=crear_menu_admin(),
-            parse_mode="Markdown"
-        )
-
-        return
-
-
 # =========================================================
 # /BACKUP
 # =========================================================
@@ -1070,25 +1118,38 @@ async def backup_command(
 
     user = update.effective_user
 
+    # -----------------------------------------------------
+    # SOLO ADMIN
+    # -----------------------------------------------------
+
     if not es_admin(user.id):
+
+        print(
+            f"🚨 /backup bloqueado para {user.id}"
+        )
 
         await update.message.reply_text(
             "⛔ Comando no disponible."
         )
 
-        print(
-            f"⚠️ Intento de /backup por usuario: "
-            f"{user.id}"
-        )
-
         return
 
+
+    # -----------------------------------------------------
+    # ESTE MENSAJE SOLO APARECE EN EL CHAT DEL ADMIN
+    # -----------------------------------------------------
+
     await update.message.reply_text(
-        "📦 Preparando respaldo de la base de datos..."
+        "📦 Preparando respaldo..."
     )
 
+
+    # -----------------------------------------------------
+    # EL BACKUP SE ENVÍA EXCLUSIVAMENTE AL ADMIN
+    # -----------------------------------------------------
+
     await crear_backup(
-        user.id,
+        ADMIN_TELEGRAM_ID,
         context
     )
 
@@ -1106,13 +1167,20 @@ async def status_command(
 
     if not es_admin(user.id):
 
+        print(
+            f"🚨 /status bloqueado para {user.id}"
+        )
+
         await update.message.reply_text(
             "⛔ Comando no disponible."
         )
 
         return
 
+
     texto = obtener_estado_sistema()
+
+    # SOLO responde al chat donde está el ADMIN.
 
     await update.message.reply_text(
         texto,
@@ -1133,11 +1201,16 @@ async def usuarios_command(
 
     if not es_admin(user.id):
 
+        print(
+            f"🚨 /usuarios bloqueado para {user.id}"
+        )
+
         await update.message.reply_text(
             "⛔ Comando no disponible."
         )
 
         return
+
 
     conexion = sqlite3.connect(
         DB_FILE
@@ -1152,6 +1225,9 @@ async def usuarios_command(
     cantidad = cursor.fetchone()[0]
 
     conexion.close()
+
+
+    # SOLO RESPONDE AL ADMIN.
 
     await update.message.reply_text(
 
@@ -1183,7 +1259,7 @@ async def main():
 
 
     # -----------------------------------------------------
-    # BOT
+    # CREAR BOT
     # -----------------------------------------------------
 
     app = (
@@ -1194,7 +1270,7 @@ async def main():
 
 
     # -----------------------------------------------------
-    # COMANDOS USUARIOS
+    # COMANDOS
     # -----------------------------------------------------
 
     app.add_handler(
@@ -1203,11 +1279,6 @@ async def main():
             start_command
         )
     )
-
-
-    # -----------------------------------------------------
-    # COMANDOS ADMIN
-    # -----------------------------------------------------
 
     app.add_handler(
         CommandHandler(
