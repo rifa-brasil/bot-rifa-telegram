@@ -9,14 +9,16 @@ from aiohttp import web
 from telegram import (
     Update,
     InlineKeyboardButton,
-    InlineKeyboardMarkup
+    InlineKeyboardMarkup,
 )
+
+from telegram.constants import ChatType
 
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
     CommandHandler,
-    CallbackQueryHandler
+    CallbackQueryHandler,
 )
 
 
@@ -31,43 +33,28 @@ DB_FILE = "database.db"
 
 
 # =========================================================
-# COMPROBAR CONFIGURACIÓN
+# VALIDACIÓN DE CONFIGURACIÓN
 # =========================================================
 
 if not TELEGRAM_TOKEN:
-    raise ValueError(
-        "❌ No se encontró TELEGRAM_TOKEN."
-    )
+    raise ValueError("❌ Falta la variable TELEGRAM_TOKEN")
 
 if not ADMIN_TELEGRAM_ID:
-    raise ValueError(
-        "❌ No se encontró ADMIN_TELEGRAM_ID."
-    )
+    raise ValueError("❌ Falta la variable ADMIN_TELEGRAM_ID")
 
 try:
     ADMIN_TELEGRAM_ID = int(ADMIN_TELEGRAM_ID)
 except ValueError:
-    raise ValueError(
-        "❌ ADMIN_TELEGRAM_ID debe ser un número."
-    )
+    raise ValueError("❌ ADMIN_TELEGRAM_ID debe ser un número")
 
 
 # =========================================================
-# COMPROBAR ADMIN
-# =========================================================
-
-def es_admin(user_id):
-    return user_id == ADMIN_TELEGRAM_ID
-
-
-# =========================================================
-# SERVIDOR WEB
+# SERVIDOR WEB PARA RENDER
 # =========================================================
 
 async def handle_web(request):
-
     return web.Response(
-        text="Bot de Trading Activo y en Línea 24/7!"
+        text="Bot de Inversiones Activo y en Línea 24/7!"
     )
 
 
@@ -75,21 +62,13 @@ async def start_web_server():
 
     app = web.Application()
 
-    app.router.add_get(
-        "/",
-        handle_web
-    )
+    app.router.add_get("/", handle_web)
 
     runner = web.AppRunner(app)
 
     await runner.setup()
 
-    port = int(
-        os.environ.get(
-            "PORT",
-            10000
-        )
-    )
+    port = int(os.environ.get("PORT", 10000))
 
     site = web.TCPSite(
         runner,
@@ -99,22 +78,27 @@ async def start_web_server():
 
     await site.start()
 
-    print(
-        f"🌐 Servidor web corriendo en el puerto {port}"
-    )
+    print(f"🌐 Servidor web corriendo en el puerto {port}")
 
 
 # =========================================================
 # BASE DE DATOS
 # =========================================================
 
+def conectar_db():
+
+    conn = sqlite3.connect(DB_FILE)
+
+    conn.row_factory = sqlite3.Row
+
+    return conn
+
+
 def inicializar_base_datos():
 
-    conexion = sqlite3.connect(
-        DB_FILE
-    )
+    conn = conectar_db()
 
-    cursor = conexion.cursor()
+    cursor = conn.cursor()
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
@@ -126,41 +110,29 @@ def inicializar_base_datos():
             invertido REAL DEFAULT 0,
             ganancias REAL DEFAULT 0,
             codigo_referido TEXT,
-            referido_por INTEGER,
+            referido_por TEXT,
             fecha_registro TEXT
         )
     """)
 
-    conexion.commit()
+    conn.commit()
 
-    conexion.close()
+    conn.close()
 
-    print(
-        "🗄️ Base de datos inicializada correctamente."
-    )
+    print("🗄️ Base de datos inicializada correctamente.")
 
 
 # =========================================================
-# REGISTRAR USUARIO
+# REGISTRAR / ACTUALIZAR USUARIO
 # =========================================================
 
 def registrar_usuario(user):
 
-    conexion = sqlite3.connect(
-        DB_FILE
-    )
+    conn = conectar_db()
 
-    cursor = conexion.cursor()
+    cursor = conn.cursor()
 
-    telegram_id = user.id
-
-    nombre = user.full_name or ""
-
-    username = user.username or ""
-
-    fecha = datetime.now().strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     cursor.execute(
         """
@@ -168,12 +140,12 @@ def registrar_usuario(user):
         FROM usuarios
         WHERE telegram_id = ?
         """,
-        (telegram_id,)
+        (user.id,)
     )
 
-    usuario = cursor.fetchone()
+    existe = cursor.fetchone()
 
-    if usuario:
+    if existe:
 
         cursor.execute(
             """
@@ -183,9 +155,9 @@ def registrar_usuario(user):
             WHERE telegram_id = ?
             """,
             (
-                nombre,
-                username,
-                telegram_id
+                user.first_name or "",
+                user.username or "",
+                user.id
             )
         )
 
@@ -207,17 +179,17 @@ def registrar_usuario(user):
             VALUES (?, ?, ?, 0, 0, 0, ?, NULL, ?)
             """,
             (
-                telegram_id,
-                nombre,
-                username,
-                str(telegram_id),
-                fecha
+                user.id,
+                user.first_name or "",
+                user.username or "",
+                f"REF{user.id}",
+                ahora
             )
         )
 
-    conexion.commit()
+    conn.commit()
 
-    conexion.close()
+    conn.close()
 
 
 # =========================================================
@@ -226,24 +198,13 @@ def registrar_usuario(user):
 
 def obtener_usuario(telegram_id):
 
-    conexion = sqlite3.connect(
-        DB_FILE
-    )
+    conn = conectar_db()
 
-    cursor = conexion.cursor()
+    cursor = conn.cursor()
 
     cursor.execute(
         """
-        SELECT
-            telegram_id,
-            nombre,
-            username,
-            saldo,
-            invertido,
-            ganancias,
-            codigo_referido,
-            referido_por,
-            fecha_registro
+        SELECT *
         FROM usuarios
         WHERE telegram_id = ?
         """,
@@ -252,18 +213,46 @@ def obtener_usuario(telegram_id):
 
     usuario = cursor.fetchone()
 
-    conexion.close()
+    conn.close()
 
     return usuario
+
+
+# =========================================================
+# COMPROBAR ADMIN
+# =========================================================
+
+def es_admin(user_id):
+
+    return user_id == ADMIN_TELEGRAM_ID
+
+
+# =========================================================
+# COMPROBAR CHAT PRIVADO DEL ADMIN
+# =========================================================
+
+def es_chat_privado_admin(update):
+
+    user = update.effective_user
+    chat = update.effective_chat
+
+    if not user or not chat:
+        return False
+
+    return (
+        user.id == ADMIN_TELEGRAM_ID
+        and chat.id == ADMIN_TELEGRAM_ID
+        and chat.type == ChatType.PRIVATE
+    )
 
 
 # =========================================================
 # MENÚ PRINCIPAL DEL USUARIO
 # =========================================================
 
-def crear_menu_principal():
+def teclado_usuario():
 
-    botones = [
+    keyboard = [
 
         [
             InlineKeyboardButton(
@@ -274,19 +263,21 @@ def crear_menu_principal():
 
         [
             InlineKeyboardButton(
-                "📈 Inversiones",
+                "💰 Inversiones",
                 callback_data="inversiones"
             )
         ],
 
         [
             InlineKeyboardButton(
-                "💰 Depositar",
+                "💵 Depositar",
                 callback_data="depositar"
-            ),
+            )
+        ],
 
+        [
             InlineKeyboardButton(
-                "💸 Retirar",
+                "🏧 Retirar",
                 callback_data="retirar"
             )
         ],
@@ -314,18 +305,16 @@ def crear_menu_principal():
 
     ]
 
-    return InlineKeyboardMarkup(
-        botones
-    )
+    return InlineKeyboardMarkup(keyboard)
 
 
 # =========================================================
-# MENÚ EXCLUSIVO DEL ADMINISTRADOR
+# MENÚ ADMINISTRATIVO
 # =========================================================
 
-def crear_menu_admin():
+def teclado_admin():
 
-    botones = [
+    keyboard = [
 
         [
             InlineKeyboardButton(
@@ -336,30 +325,28 @@ def crear_menu_admin():
 
         [
             InlineKeyboardButton(
-                "🗄️ Crear respaldo",
+                "📦 Crear respaldo",
                 callback_data="admin_backup"
             )
         ],
 
         [
             InlineKeyboardButton(
-                "📊 Estado del sistema",
+                "🖥️ Estado del sistema",
                 callback_data="admin_status"
             )
         ],
 
         [
             InlineKeyboardButton(
-                "⬅️ Menú usuario",
-                callback_data="inicio"
+                "👤 Menú usuario",
+                callback_data="admin_usuario"
             )
         ]
 
     ]
 
-    return InlineKeyboardMarkup(
-        botones
-    )
+    return InlineKeyboardMarkup(keyboard)
 
 
 # =========================================================
@@ -371,6 +358,9 @@ async def start_command(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
+    if not update.message:
+        return
+
     user = update.effective_user
 
     registrar_usuario(user)
@@ -378,15 +368,14 @@ async def start_command(
     nombre = user.first_name or "Usuario"
 
     texto = (
-        f"👋 Hola, *{nombre}*.\n\n"
-        "🤖 Bienvenido a nuestro bot de trading.\n\n"
+        f"👋 ¡Hola {nombre}!\n\n"
+        "Bienvenido a tu cuenta.\n\n"
         "Selecciona una opción:"
     )
 
     await update.message.reply_text(
         texto,
-        reply_markup=crear_menu_principal(),
-        parse_mode="Markdown"
+        reply_markup=teclado_usuario()
     )
 
 
@@ -399,304 +388,269 @@ async def admin_command(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
+    if not update.message:
+        return
+
     user = update.effective_user
 
-    # NUNCA mostrar información administrativa
-    # a usuarios normales.
+    chat = update.effective_chat
 
-    if not es_admin(user.id):
-
-        print(
-            f"⚠️ Intento de acceso admin: {user.id}"
-        )
-
-        await update.message.reply_text(
-            "⛔ Comando no disponible."
-        )
-
+    # Nunca mostrar panel admin en grupos
+    if (
+        user.id != ADMIN_TELEGRAM_ID
+        or chat.id != ADMIN_TELEGRAM_ID
+        or chat.type != ChatType.PRIVATE
+    ):
         return
 
     texto = (
-        "🔐 *PANEL DE ADMINISTRADOR*\n\n"
-        "Esta sección es privada.\n\n"
+        "🔐 *PANEL ADMINISTRATIVO*\n\n"
         "Selecciona una opción:"
     )
 
     await update.message.reply_text(
         texto,
-        reply_markup=crear_menu_admin(),
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        reply_markup=teclado_admin()
     )
 
 
 # =========================================================
-# MOSTRAR CUENTA
+# MOSTRAR MENÚ USUARIO
 # =========================================================
 
-async def mostrar_cuenta(
-    query,
-    user
-):
-
-    usuario = obtener_usuario(
-        user.id
-    )
-
-    if not usuario:
-
-        registrar_usuario(user)
-
-        usuario = obtener_usuario(
-            user.id
-        )
-
-    (
-        telegram_id,
-        nombre,
-        username,
-        saldo,
-        invertido,
-        ganancias,
-        codigo_referido,
-        referido_por,
-        fecha_registro
-    ) = usuario
-
-    texto = (
-        "👤 *MI CUENTA*\n\n"
-        f"🧑 Nombre: {nombre}\n"
-        f"🔹 Usuario: "
-        f"@{username if username else 'Sin username'}\n"
-        f"🆔 ID: `{telegram_id}`\n\n"
-        f"💰 Saldo: ${saldo:.2f}\n"
-        f"📊 Invertido: ${invertido:.2f}\n"
-        f"📈 Ganancias: ${ganancias:.2f}\n\n"
-        f"🎁 Código de referido: `{codigo_referido}`"
-    )
-
-    teclado = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "⬅️ Volver",
-                callback_data="inicio"
-            )
-        ]
-    ])
-
-    await query.edit_message_text(
-        texto,
-        reply_markup=teclado,
-        parse_mode="Markdown"
-    )
-
-
-# =========================================================
-# ESTADO DEL SISTEMA
-# =========================================================
-
-def obtener_estado_sistema():
-
-    if not os.path.exists(DB_FILE):
-
-        return (
-            "📊 *ESTADO DEL SISTEMA*\n\n"
-            "🔴 Base de datos no encontrada."
-        )
-
-    tamaño = os.path.getsize(
-        DB_FILE
-    )
-
-    conexion = sqlite3.connect(
-        DB_FILE
-    )
-
-    cursor = conexion.cursor()
-
-    cursor.execute(
-        "SELECT COUNT(*) FROM usuarios"
-    )
-
-    usuarios = cursor.fetchone()[0]
-
-    conexion.close()
-
-    return (
-        "📊 *ESTADO DEL SISTEMA*\n\n"
-        "🟢 Bot funcionando\n"
-        "🟢 Base de datos funcionando\n\n"
-        f"👥 Usuarios registrados: *{usuarios}*\n"
-        f"🗄️ Base de datos: `{DB_FILE}`\n"
-        f"📦 Tamaño: `{tamaño} bytes`"
-    )
-
-
-# =========================================================
-# BACKUP EXCLUSIVO DEL ADMIN
-# =========================================================
-
-async def crear_backup(
-    admin_id,
+async def mostrar_menu_usuario(
+    chat_id,
     context
 ):
 
-    # -----------------------------------------------------
-    # SEGURIDAD
-    # -----------------------------------------------------
-
-    if not es_admin(admin_id):
-
-        print(
-            f"🚨 Intento de backup no autorizado: "
-            f"{admin_id}"
-        )
-
-        return
-
-
-    # -----------------------------------------------------
-    # COMPROBAR BASE DE DATOS
-    # -----------------------------------------------------
-
-    if not os.path.exists(DB_FILE):
-
-        await context.bot.send_message(
-            chat_id=ADMIN_TELEGRAM_ID,
-            text="❌ No se encontró la base de datos."
-        )
-
-        return
-
-
-    fecha = datetime.now().strftime(
-        "%Y-%m-%d_%H-%M-%S"
+    texto = (
+        "🏠 *MENÚ PRINCIPAL*\n\n"
+        "Selecciona una opción:"
     )
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=texto,
+        parse_mode="Markdown",
+        reply_markup=teclado_usuario()
+    )
+
+
+# =========================================================
+# MOSTRAR PANEL ADMIN
+# =========================================================
+
+async def mostrar_panel_admin(
+    chat_id,
+    context
+):
+
+    # Seguridad adicional
+    if chat_id != ADMIN_TELEGRAM_ID:
+        return
+
+    texto = (
+        "🔐 *PANEL ADMINISTRATIVO*\n\n"
+        "Selecciona una opción:"
+    )
+
+    await context.bot.send_message(
+        chat_id=ADMIN_TELEGRAM_ID,
+        text=texto,
+        parse_mode="Markdown",
+        reply_markup=teclado_admin()
+    )
+
+
+# =========================================================
+# /USUARIOS
+# =========================================================
+
+async def usuarios_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not es_chat_privado_admin(update):
+        return
+
+    conn = conectar_db()
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS total
+        FROM usuarios
+        """
+    )
+
+    resultado = cursor.fetchone()
+
+    total = resultado["total"]
+
+    conn.close()
+
+    texto = (
+        "👥 *USUARIOS REGISTRADOS*\n\n"
+        f"Total de usuarios: *{total}*"
+    )
+
+    await context.bot.send_message(
+        chat_id=ADMIN_TELEGRAM_ID,
+        text=texto,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔙 Volver al panel",
+                    callback_data="admin_inicio"
+                )
+            ]
+        ])
+    )
+
+
+# =========================================================
+# /STATUS
+# =========================================================
+
+async def status_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not es_chat_privado_admin(update):
+        return
+
+    existe_db = os.path.exists(DB_FILE)
+
+    tamano_db = 0
+
+    if existe_db:
+        tamano_db = os.path.getsize(DB_FILE)
+
+    conn = conectar_db()
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT COUNT(*) AS total FROM usuarios"
+    )
+
+    total_usuarios = cursor.fetchone()["total"]
+
+    conn.close()
+
+    texto = (
+        "🖥️ *ESTADO DEL SISTEMA*\n\n"
+        "🤖 Bot: 🟢 Activo\n"
+        f"🗄️ Base de datos: {'🟢 OK' if existe_db else '🔴 No existe'}\n"
+        f"📁 Tamaño DB: {tamano_db} bytes\n"
+        f"👥 Usuarios: {total_usuarios}\n"
+        "🌐 Servidor web: 🟢 Activo"
+    )
+
+    await context.bot.send_message(
+        chat_id=ADMIN_TELEGRAM_ID,
+        text=texto,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔙 Volver al panel",
+                    callback_data="admin_inicio"
+                )
+            ]
+        ])
+    )
+
+
+# =========================================================
+# CREAR RESPALDO
+# =========================================================
+
+async def crear_backup(
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    # Seguridad absoluta:
+    # el backup SIEMPRE va al admin
+    chat_id = ADMIN_TELEGRAM_ID
 
     backup_file = (
-        f"database_backup_{fecha}.db"
+        f"backup_database_"
+        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
     )
-
 
     try:
 
-        print(
-            f"📦 Creando backup para administrador "
-            f"{ADMIN_TELEGRAM_ID}"
-        )
+        if not os.path.exists(DB_FILE):
 
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="❌ No existe la base de datos para crear el respaldo."
+            )
+
+            return False
+
+        # Copia física de SQLite
         shutil.copy2(
             DB_FILE,
             backup_file
         )
 
-        if not os.path.exists(
-            backup_file
-        ):
-
-            raise Exception(
-                "La copia no fue creada."
-            )
-
-        tamaño = os.path.getsize(
-            backup_file
-        )
-
-
-        # -------------------------------------------------
-        # IMPORTANTE:
-        # EL ARCHIVO SOLO SE ENVÍA AL ADMINISTRADOR
-        # -------------------------------------------------
-
-        with open(
-            backup_file,
-            "rb"
-        ) as archivo:
+        # Enviar SOLO al administrador
+        with open(backup_file, "rb") as archivo:
 
             await context.bot.send_document(
-
-                chat_id=ADMIN_TELEGRAM_ID,
-
+                chat_id=chat_id,
                 document=archivo,
-
                 filename=backup_file,
-
                 caption=(
-                    "✅ *RESPALDO COMPLETADO*\n\n"
-                    f"🗄️ Base de datos: `{DB_FILE}`\n"
-                    f"📁 Archivo: `{backup_file}`\n"
-                    f"📦 Tamaño: `{tamaño} bytes`\n"
-                    f"📅 Fecha: `{fecha}`\n\n"
-                    "🔐 Este respaldo es privado."
+                    "📦 *Respaldo creado correctamente.*\n\n"
+                    f"📁 Archivo: `{backup_file}`"
                 ),
-
                 parse_mode="Markdown"
             )
 
+        # Eliminar copia temporal
+        try:
+            os.remove(backup_file)
+        except Exception:
+            pass
 
-        print(
-            "✅ Backup enviado exclusivamente "
-            "al administrador."
-        )
-
+        return True
 
     except Exception as e:
 
-        error = str(e)
-
         print(
-            f"❌ ERROR DEL BACKUP: {error}"
+            f"❌ Error creando respaldo: {e}"
         )
-
-        # El error también va SOLO al administrador.
 
         try:
 
             await context.bot.send_message(
-
-                chat_id=ADMIN_TELEGRAM_ID,
-
+                chat_id=chat_id,
                 text=(
-                    "❌ *Error al crear el respaldo.*\n\n"
-                    f"🔎 Error:\n`{error}`"
+                    "❌ *Error creando el respaldo.*\n\n"
+                    f"Detalles: `{str(e)}`"
                 ),
-
                 parse_mode="Markdown"
             )
 
         except Exception as error_envio:
 
             print(
-                f"❌ Error enviando mensaje al admin: "
-                f"{error_envio}"
+                f"❌ Error enviando error al admin: {error_envio}"
             )
 
-
-    finally:
-
-        if os.path.exists(
-            backup_file
-        ):
-
-            try:
-
-                os.remove(
-                    backup_file
-                )
-
-                print(
-                    "🗑️ Copia temporal eliminada."
-                )
-
-            except Exception as e:
-
-                print(
-                    f"⚠️ No se pudo eliminar "
-                    f"la copia temporal: {e}"
-                )
+        return False
 
 
 # =========================================================
-# CALLBACKS
+# CALLBACK PRINCIPAL
 # =========================================================
 
 async def boton_callback(
@@ -706,65 +660,211 @@ async def boton_callback(
 
     query = update.callback_query
 
+    if not query:
+        return
+
     user = query.from_user
 
-    accion = query.data
-
+    accion = query.data or ""
 
     # =====================================================
-    # PROTECCIÓN ADMINISTRATIVA PRIMERO
+    # SEGURIDAD ADMINISTRATIVA
     # =====================================================
 
     if accion.startswith("admin_"):
 
-        # -------------------------------------------------
-        # SI NO ES ADMIN:
-        # NO EJECUTAR NADA ADMINISTRATIVO
-        # -------------------------------------------------
+        # El callback administrativo solo puede ejecutarse
+        # desde el chat privado del administrador.
 
-        if not es_admin(user.id):
+        if (
+            user.id != ADMIN_TELEGRAM_ID
+            or not query.message
+            or query.message.chat.id != ADMIN_TELEGRAM_ID
+            or query.message.chat.type != ChatType.PRIVATE
+        ):
 
-            print(
-                f"🚨 Callback admin bloqueado: "
-                f"user={user.id}, "
-                f"accion={accion}"
-            )
-
+            # Solo responde al usuario que hizo clic.
+            # NO manda ningún mensaje al grupo.
             await query.answer(
-                "⛔ No tienes permiso.",
+                "⛔ Acción no autorizada.",
                 show_alert=True
             )
 
             return
 
-
-    # =====================================================
-    # AHORA SÍ RESPONDER AL CALLBACK
-    # =====================================================
-
+    # Confirmamos callback
     await query.answer()
 
+    # =====================================================
+    # PANEL ADMIN
+    # =====================================================
 
-    # Registrar únicamente al usuario que está interactuando.
+    if accion == "admin_inicio":
 
-    registrar_usuario(user)
+        await query.edit_message_text(
+            "🔐 *PANEL ADMINISTRATIVO*\n\n"
+            "Selecciona una opción:",
+            parse_mode="Markdown",
+            reply_markup=teclado_admin()
+        )
+
+        return
 
 
     # =====================================================
-    # MENÚ PRINCIPAL
+    # USUARIOS
     # =====================================================
 
-    if accion == "inicio":
+    if accion == "admin_usuarios":
+
+        conn = conectar_db()
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM usuarios
+            """
+        )
+
+        total = cursor.fetchone()["total"]
+
+        conn.close()
 
         texto = (
-            "🤖 *MENÚ PRINCIPAL*\n\n"
-            "Selecciona una opción:"
+            "👥 *USUARIOS REGISTRADOS*\n\n"
+            f"Total: *{total}*"
         )
 
         await query.edit_message_text(
             texto,
-            reply_markup=crear_menu_principal(),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Volver al panel",
+                        callback_data="admin_inicio"
+                    )
+                ]
+            ])
+        )
+
+        return
+
+
+    # =====================================================
+    # ESTADO DEL SISTEMA
+    # =====================================================
+
+    if accion == "admin_status":
+
+        existe_db = os.path.exists(DB_FILE)
+
+        tamano_db = (
+            os.path.getsize(DB_FILE)
+            if existe_db
+            else 0
+        )
+
+        conn = conectar_db()
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT COUNT(*) AS total FROM usuarios"
+        )
+
+        total_usuarios = cursor.fetchone()["total"]
+
+        conn.close()
+
+        texto = (
+            "🖥️ *ESTADO DEL SISTEMA*\n\n"
+            "🤖 Bot: 🟢 Activo\n"
+            f"🗄️ Base de datos: "
+            f"{'🟢 OK' if existe_db else '🔴 No existe'}\n"
+            f"📁 Tamaño: {tamano_db} bytes\n"
+            f"👥 Usuarios: {total_usuarios}\n"
+            "🌐 Servidor web: 🟢 Activo"
+        )
+
+        await query.edit_message_text(
+            texto,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Volver al panel",
+                        callback_data="admin_inicio"
+                    )
+                ]
+            ])
+        )
+
+        return
+
+
+    # =====================================================
+    # CREAR BACKUP
+    # =====================================================
+
+    if accion == "admin_backup":
+
+        # Este mensaje SOLO existe en el chat privado del admin
+        await query.edit_message_text(
+            "📦 *Preparando respaldo...*",
             parse_mode="Markdown"
+        )
+
+        resultado = await crear_backup(context)
+
+        # Después de enviar el archivo,
+        # volver automáticamente al panel.
+        if resultado:
+
+            await mostrar_panel_admin(
+                ADMIN_TELEGRAM_ID,
+                context
+            )
+
+        else:
+
+            await mostrar_panel_admin(
+                ADMIN_TELEGRAM_ID,
+                context
+            )
+
+        return
+
+
+    # =====================================================
+    # MENÚ USUARIO DESDE ADMIN
+    # =====================================================
+
+    if accion == "admin_usuario":
+
+        await query.edit_message_text(
+            "👤 *MENÚ DE USUARIO*\n\n"
+            "Este es el mismo menú que verá un usuario normal.",
+            parse_mode="Markdown",
+            reply_markup=teclado_usuario()
+        )
+
+        return
+
+
+    # =====================================================
+    # VOLVER AL MENÚ USUARIO
+    # =====================================================
+
+    if accion == "inicio":
+
+        await query.edit_message_text(
+            "🏠 *MENÚ PRINCIPAL*\n\n"
+            "Selecciona una opción:",
+            parse_mode="Markdown",
+            reply_markup=teclado_usuario()
         )
 
         return
@@ -776,9 +876,48 @@ async def boton_callback(
 
     if accion == "cuenta":
 
-        await mostrar_cuenta(
-            query,
-            user
+        registrar_usuario(user)
+
+        usuario = obtener_usuario(user.id)
+
+        if not usuario:
+
+            await query.edit_message_text(
+                "❌ No se pudo encontrar tu cuenta.",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "🔙 Volver",
+                            callback_data="inicio"
+                        )
+                    ]
+                ])
+            )
+
+            return
+
+        texto = (
+            "👤 *MI CUENTA*\n\n"
+            f"🆔 ID: `{usuario['telegram_id']}`\n"
+            f"👤 Nombre: {usuario['nombre'] or 'Sin nombre'}\n"
+            f"📱 Usuario: "
+            f"@{usuario['username'] or 'Sin username'}\n\n"
+            f"💰 Saldo: *{usuario['saldo']:.2f}*\n"
+            f"📊 Invertido: *{usuario['invertido']:.2f}*\n"
+            f"📈 Ganancias: *{usuario['ganancias']:.2f}*"
+        )
+
+        await query.edit_message_text(
+            texto,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Volver",
+                        callback_data="inicio"
+                    )
+                ]
+            ])
         )
 
         return
@@ -791,24 +930,23 @@ async def boton_callback(
     if accion == "inversiones":
 
         texto = (
-            "📈 *INVERSIONES*\n\n"
-            "Esta sección estará disponible "
-            "en la siguiente etapa."
+            "💰 *INVERSIONES*\n\n"
+            "Aquí aparecerán las opciones de inversión "
+            "disponibles para tu cuenta.\n\n"
+            "🔒 Esta sección será configurada en la siguiente etapa."
         )
-
-        teclado = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "⬅️ Volver",
-                    callback_data="inicio"
-                )
-            ]
-        ])
 
         await query.edit_message_text(
             texto,
-            reply_markup=teclado,
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Volver",
+                        callback_data="inicio"
+                    )
+                ]
+            ])
         )
 
         return
@@ -821,24 +959,24 @@ async def boton_callback(
     if accion == "depositar":
 
         texto = (
-            "💰 *DEPOSITAR*\n\n"
-            "La función de depósitos se configurará "
-            "en la siguiente etapa."
+            "💵 *DEPOSITAR*\n\n"
+            "La sección de depósitos será configurada "
+            "en la siguiente etapa.\n\n"
+            "Cada solicitud quedará asociada exclusivamente "
+            "a tu cuenta de Telegram."
         )
-
-        teclado = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "⬅️ Volver",
-                    callback_data="inicio"
-                )
-            ]
-        ])
 
         await query.edit_message_text(
             texto,
-            reply_markup=teclado,
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Volver",
+                        callback_data="inicio"
+                    )
+                ]
+            ])
         )
 
         return
@@ -851,24 +989,24 @@ async def boton_callback(
     if accion == "retirar":
 
         texto = (
-            "💸 *RETIRAR*\n\n"
-            "La función de retiros se configurará "
-            "en la siguiente etapa."
+            "🏧 *RETIRAR*\n\n"
+            "La sección de retiros será configurada "
+            "en la siguiente etapa.\n\n"
+            "Las solicitudes estarán vinculadas únicamente "
+            "a tu cuenta."
         )
-
-        teclado = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "⬅️ Volver",
-                    callback_data="inicio"
-                )
-            ]
-        ])
 
         await query.edit_message_text(
             texto,
-            reply_markup=teclado,
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Volver",
+                        callback_data="inicio"
+                    )
+                ]
+            ])
         )
 
         return
@@ -880,37 +1018,31 @@ async def boton_callback(
 
     if accion == "referidos":
 
-        usuario = obtener_usuario(
-            user.id
-        )
+        registrar_usuario(user)
 
-        codigo = (
-            usuario[6]
-            if usuario and usuario[6]
-            else str(user.id)
-        )
+        usuario = obtener_usuario(user.id)
+
+        codigo = usuario["codigo_referido"]
 
         texto = (
-            "👥 *PROGRAMA DE REFERIDOS*\n\n"
-            "Tu código de referido es:\n\n"
+            "👥 *REFERIDOS*\n\n"
+            f"🔗 Tu código de referido:\n"
             f"`{codigo}`\n\n"
-            "La función completa de referidos "
-            "se configurará en una próxima etapa."
+            "Aquí aparecerán tus referidos y las "
+            "comisiones correspondientes."
         )
-
-        teclado = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "⬅️ Volver",
-                    callback_data="inicio"
-                )
-            ]
-        ])
 
         await query.edit_message_text(
             texto,
-            reply_markup=teclado,
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Volver",
+                        callback_data="inicio"
+                    )
+                ]
+            ])
         )
 
         return
@@ -924,23 +1056,23 @@ async def boton_callback(
 
         texto = (
             "📜 *HISTORIAL*\n\n"
-            "Todavía no tienes movimientos "
-            "registrados en el sistema."
+            "Todavía no hay movimientos registrados "
+            "para mostrar.\n\n"
+            "Tus movimientos futuros aparecerán "
+            "exclusivamente en tu cuenta."
         )
-
-        teclado = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "⬅️ Volver",
-                    callback_data="inicio"
-                )
-            ]
-        ])
 
         await query.edit_message_text(
             texto,
-            reply_markup=teclado,
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Volver",
+                        callback_data="inicio"
+                    )
+                ]
+            ])
         )
 
         return
@@ -954,161 +1086,30 @@ async def boton_callback(
 
         texto = (
             "ℹ️ *INFORMACIÓN*\n\n"
-            "🤖 Plataforma de trading\n\n"
-            "Esta aplicación permitirá gestionar "
-            "usuarios, depósitos, inversiones, "
-            "retiros y movimientos desde Telegram."
-        )
-
-        teclado = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "⬅️ Volver",
-                    callback_data="inicio"
-                )
-            ]
-        ])
-
-        await query.edit_message_text(
-            texto,
-            reply_markup=teclado,
-            parse_mode="Markdown"
-        )
-
-        return
-
-
-    # =====================================================
-    # PANEL ADMIN
-    # =====================================================
-
-    if accion == "admin_inicio":
-
-        # Esta comprobación es obligatoria.
-
-        if not es_admin(user.id):
-            return
-
-        texto = (
-            "🔐 *PANEL DE ADMINISTRADOR*\n\n"
-            "Esta sección es privada.\n\n"
-            "Selecciona una opción:"
+            "Bienvenido a nuestra plataforma.\n\n"
+            "Desde aquí podrás consultar las diferentes "
+            "funciones disponibles para tu cuenta."
         )
 
         await query.edit_message_text(
             texto,
-            reply_markup=crear_menu_admin(),
-            parse_mode="Markdown"
-        )
-
-        return
-
-
-    # =====================================================
-    # ADMIN - USUARIOS
-    # =====================================================
-
-    if accion == "admin_usuarios":
-
-        if not es_admin(user.id):
-            return
-
-        conexion = sqlite3.connect(
-            DB_FILE
-        )
-
-        cursor = conexion.cursor()
-
-        cursor.execute(
-            "SELECT COUNT(*) FROM usuarios"
-        )
-
-        cantidad = cursor.fetchone()[0]
-
-        conexion.close()
-
-        texto = (
-            "👥 *USUARIOS REGISTRADOS*\n\n"
-            f"Total de usuarios: *{cantidad}*"
-        )
-
-        teclado = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "⬅️ Panel admin",
-                    callback_data="admin_inicio"
-                )
-            ]
-        ])
-
-        await query.edit_message_text(
-            texto,
-            reply_markup=teclado,
-            parse_mode="Markdown"
-        )
-
-        return
-
-
-    # =====================================================
-    # ADMIN - BACKUP
-    # =====================================================
-
-    if accion == "admin_backup":
-
-        if not es_admin(user.id):
-            return
-
-        # -------------------------------------------------
-        # ESTE MENSAJE SE EDITA EN EL CHAT PRIVADO
-        # DEL ADMINISTRADOR.
-        # -------------------------------------------------
-
-        await query.edit_message_text(
-            "📦 Preparando respaldo..."
-        )
-
-        # El backup SIEMPRE utiliza el ID del administrador.
-
-        await crear_backup(
-            ADMIN_TELEGRAM_ID,
-            context
-        )
-
-        return
-
-
-    # =====================================================
-    # ADMIN - ESTADO
-    # =====================================================
-
-    if accion == "admin_status":
-
-        if not es_admin(user.id):
-            return
-
-        texto = obtener_estado_sistema()
-
-        teclado = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "⬅️ Panel admin",
-                    callback_data="admin_inicio"
-                )
-            ]
-        ])
-
-        await query.edit_message_text(
-            texto,
-            reply_markup=teclado,
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Volver",
+                        callback_data="inicio"
+                    )
+                ]
+            ])
         )
 
         return
 
 
 # =========================================================
-# /BACKUP
+# COMANDOS ADMINISTRATIVOS
+# SOLO CHAT PRIVADO DEL ADMIN
 # =========================================================
 
 async def backup_command(
@@ -1116,125 +1117,39 @@ async def backup_command(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    user = update.effective_user
-
-    # -----------------------------------------------------
-    # SOLO ADMIN
-    # -----------------------------------------------------
-
-    if not es_admin(user.id):
-
-        print(
-            f"🚨 /backup bloqueado para {user.id}"
-        )
-
-        await update.message.reply_text(
-            "⛔ Comando no disponible."
-        )
-
+    if not es_chat_privado_admin(update):
         return
 
-
-    # -----------------------------------------------------
-    # ESTE MENSAJE SOLO APARECE EN EL CHAT DEL ADMIN
-    # -----------------------------------------------------
-
-    await update.message.reply_text(
-        "📦 Preparando respaldo..."
+    await context.bot.send_message(
+        chat_id=ADMIN_TELEGRAM_ID,
+        text="📦 *Preparando respaldo...*",
+        parse_mode="Markdown"
     )
 
+    await crear_backup(context)
 
-    # -----------------------------------------------------
-    # EL BACKUP SE ENVÍA EXCLUSIVAMENTE AL ADMIN
-    # -----------------------------------------------------
-
-    await crear_backup(
+    await mostrar_panel_admin(
         ADMIN_TELEGRAM_ID,
         context
     )
 
 
-# =========================================================
-# /STATUS
-# =========================================================
-
-async def status_command(
+async def admin_status_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    user = update.effective_user
-
-    if not es_admin(user.id):
-
-        print(
-            f"🚨 /status bloqueado para {user.id}"
-        )
-
-        await update.message.reply_text(
-            "⛔ Comando no disponible."
-        )
-
+    if not es_chat_privado_admin(update):
         return
 
-
-    texto = obtener_estado_sistema()
-
-    # SOLO responde al chat donde está el ADMIN.
-
-    await update.message.reply_text(
-        texto,
-        parse_mode="Markdown"
+    await status_command(
+        update,
+        context
     )
 
-
-# =========================================================
-# /USUARIOS
-# =========================================================
-
-async def usuarios_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    user = update.effective_user
-
-    if not es_admin(user.id):
-
-        print(
-            f"🚨 /usuarios bloqueado para {user.id}"
-        )
-
-        await update.message.reply_text(
-            "⛔ Comando no disponible."
-        )
-
-        return
-
-
-    conexion = sqlite3.connect(
-        DB_FILE
-    )
-
-    cursor = conexion.cursor()
-
-    cursor.execute(
-        "SELECT COUNT(*) FROM usuarios"
-    )
-
-    cantidad = cursor.fetchone()[0]
-
-    conexion.close()
-
-
-    # SOLO RESPONDE AL ADMIN.
-
-    await update.message.reply_text(
-
-        "👥 *USUARIOS REGISTRADOS*\n\n"
-        f"Total de usuarios: *{cantidad}*",
-
-        parse_mode="Markdown"
+    await mostrar_panel_admin(
+        ADMIN_TELEGRAM_ID,
+        context
     )
 
 
@@ -1244,34 +1159,21 @@ async def usuarios_command(
 
 async def main():
 
-    # -----------------------------------------------------
-    # BASE DE DATOS
-    # -----------------------------------------------------
-
     inicializar_base_datos()
 
-
-    # -----------------------------------------------------
-    # SERVIDOR WEB
-    # -----------------------------------------------------
-
+    # Servidor web
     await start_web_server()
 
-
-    # -----------------------------------------------------
-    # CREAR BOT
-    # -----------------------------------------------------
-
+    # Aplicación Telegram
     app = (
         ApplicationBuilder()
         .token(TELEGRAM_TOKEN)
         .build()
     )
 
-
-    # -----------------------------------------------------
-    # COMANDOS
-    # -----------------------------------------------------
+    # -----------------------------------------
+    # COMANDOS DE USUARIO
+    # -----------------------------------------
 
     app.add_handler(
         CommandHandler(
@@ -1279,6 +1181,10 @@ async def main():
             start_command
         )
     )
+
+    # -----------------------------------------
+    # COMANDOS ADMIN
+    # -----------------------------------------
 
     app.add_handler(
         CommandHandler(
@@ -1296,22 +1202,21 @@ async def main():
 
     app.add_handler(
         CommandHandler(
-            "status",
-            status_command
-        )
-    )
-
-    app.add_handler(
-        CommandHandler(
             "usuarios",
             usuarios_command
         )
     )
 
+    app.add_handler(
+        CommandHandler(
+            "status",
+            status_command
+        )
+    )
 
-    # -----------------------------------------------------
-    # BOTONES
-    # -----------------------------------------------------
+    # -----------------------------------------
+    # CALLBACKS
+    # -----------------------------------------
 
     app.add_handler(
         CallbackQueryHandler(
@@ -1319,33 +1224,42 @@ async def main():
         )
     )
 
-
-    # -----------------------------------------------------
-    # INICIAR
-    # -----------------------------------------------------
-
     print(
-        "🤖 Bot de Trading iniciado correctamente..."
+        "🤖 Bot iniciado correctamente..."
     )
 
+    # Inicialización
     await app.initialize()
 
     await app.start()
 
-    await app.updater.start_polling()
+    await app.updater.start_polling(
+        drop_pending_updates=True
+    )
 
+    print(
+        "🟢 Bot funcionando 24/7..."
+    )
 
-    # -----------------------------------------------------
-    # MANTENER ACTIVO
-    # -----------------------------------------------------
-
+    # Mantener proceso activo
     await asyncio.Event().wait()
 
 
 # =========================================================
-# EJECUCIÓN
+# EJECUTAR
 # =========================================================
 
 if __name__ == "__main__":
 
-    asyncio.run(main())
+    try:
+
+        asyncio.run(main())
+
+    except (
+        KeyboardInterrupt,
+        SystemExit
+    ):
+
+        print(
+            "🛑 Bot detenido correctamente."
+        )
