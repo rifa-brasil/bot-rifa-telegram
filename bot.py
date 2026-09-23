@@ -1,43 +1,22 @@
 import os
 import asyncio
+import sqlite3
+from datetime import datetime
+
 from aiohttp import web
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
+
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
     CommandHandler,
-    CallbackQueryHandler,
+    CallbackQueryHandler
 )
-
-
-# =========================================================
-# SERVIDOR WEB
-# MISMA ESTRUCTURA DEL BOT DE RIFA
-# =========================================================
-
-async def handle_web(request):
-    return web.Response(text="Bot de Inversión Activo y en Línea 24/7!")
-
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle_web)
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-
-    port = int(os.environ.get("PORT", 10000))
-
-    site = web.TCPSite(
-        runner,
-        "0.0.0.0",
-        port
-    )
-
-    await site.start()
-
-    print(f"🌐 Servidor web corriendo en el puerto {port}")
 
 
 # =========================================================
@@ -50,15 +29,238 @@ ADMIN_TELEGRAM_ID = int(
     os.environ.get("ADMIN_TELEGRAM_ID", "0")
 )
 
+DB_FILE = "database.db"
+
 
 # =========================================================
-# COMPROBACIÓN DEL TOKEN
+# COMPROBAR TOKEN
 # =========================================================
 
 if not TELEGRAM_TOKEN:
     raise ValueError(
         "❌ No existe la variable TELEGRAM_TOKEN"
     )
+
+
+# =========================================================
+# SERVIDOR WEB
+# =========================================================
+
+async def handle_web(request):
+
+    return web.Response(
+        text="Bot de Inversión Activo y en Línea 24/7!"
+    )
+
+
+async def start_web_server():
+
+    app = web.Application()
+
+    app.router.add_get(
+        "/",
+        handle_web
+    )
+
+    runner = web.AppRunner(app)
+
+    await runner.setup()
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            10000
+        )
+    )
+
+    site = web.TCPSite(
+        runner,
+        "0.0.0.0",
+        port
+    )
+
+    await site.start()
+
+    print(
+        f"🌐 Servidor web corriendo en el puerto {port}"
+    )
+
+
+# =========================================================
+# BASE DE DATOS
+# =========================================================
+
+def conectar_db():
+
+    return sqlite3.connect(DB_FILE)
+
+
+def inicializar_base_datos():
+
+    conn = conectar_db()
+
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            telegram_id INTEGER UNIQUE NOT NULL,
+
+            nombre TEXT,
+
+            username TEXT,
+
+            saldo REAL DEFAULT 0,
+
+            invertido REAL DEFAULT 0,
+
+            ganancias REAL DEFAULT 0,
+
+            codigo_referido TEXT,
+
+            referido_por INTEGER,
+
+            fecha_registro TEXT
+
+        )
+    """)
+
+    conn.commit()
+
+    conn.close()
+
+    print("🗄️ Base de datos inicializada correctamente.")
+
+
+# =========================================================
+# BUSCAR USUARIO
+# =========================================================
+
+def obtener_usuario(telegram_id):
+
+    conn = conectar_db()
+
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            telegram_id,
+            nombre,
+            username,
+            saldo,
+            invertido,
+            ganancias,
+            codigo_referido,
+            referido_por,
+            fecha_registro
+
+        FROM usuarios
+
+        WHERE telegram_id = ?
+    """, (telegram_id,))
+
+    usuario = cursor.fetchone()
+
+    conn.close()
+
+    return usuario
+
+
+# =========================================================
+# CREAR USUARIO
+# =========================================================
+
+def registrar_usuario(
+    telegram_id,
+    nombre,
+    username
+):
+
+    usuario = obtener_usuario(
+        telegram_id
+    )
+
+    # Si ya existe, actualizamos
+    # nombre y username.
+
+    if usuario:
+
+        conn = conectar_db()
+
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            UPDATE usuarios
+
+            SET nombre = ?,
+                username = ?
+
+            WHERE telegram_id = ?
+        """, (
+            nombre,
+            username,
+            telegram_id
+        ))
+
+        conn.commit()
+
+        conn.close()
+
+        return False
+
+
+    # Código de referido basado
+    # en el ID de Telegram.
+
+    codigo_referido = str(
+        telegram_id
+    )
+
+    fecha = datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    conn = conectar_db()
+
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT INTO usuarios (
+
+            telegram_id,
+            nombre,
+            username,
+            saldo,
+            invertido,
+            ganancias,
+            codigo_referido,
+            referido_por,
+            fecha_registro
+
+        )
+
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+
+    """, (
+        telegram_id,
+        nombre,
+        username,
+        0,
+        0,
+        0,
+        codigo_referido,
+        None,
+        fecha
+    ))
+
+    conn.commit()
+
+    conn.close()
+
+    return True
 
 
 # =========================================================
@@ -74,6 +276,7 @@ def menu_principal():
                 "👤 Mi cuenta",
                 callback_data="cuenta"
             ),
+
             InlineKeyboardButton(
                 "📈 Inversiones",
                 callback_data="inversiones"
@@ -85,6 +288,7 @@ def menu_principal():
                 "💰 Depositar",
                 callback_data="depositar"
             ),
+
             InlineKeyboardButton(
                 "💸 Retirar",
                 callback_data="retirar"
@@ -96,6 +300,7 @@ def menu_principal():
                 "👥 Referidos",
                 callback_data="referidos"
             ),
+
             InlineKeyboardButton(
                 "📜 Historial",
                 callback_data="historial"
@@ -111,7 +316,44 @@ def menu_principal():
 
     ]
 
-    return InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup(
+        keyboard
+    )
+
+
+# =========================================================
+# TEXTO DEL MENÚ
+# =========================================================
+
+def texto_inicio(telegram_id):
+
+    usuario = obtener_usuario(
+        telegram_id
+    )
+
+    if not usuario:
+
+        return (
+            "❌ Usuario no encontrado."
+        )
+
+    nombre = usuario[2] or "Usuario"
+
+    saldo = usuario[4] or 0
+    invertido = usuario[5] or 0
+    ganancias = usuario[6] or 0
+
+    return (
+        "💰 *PLATAFORMA DE INVERSIÓN*\n"
+        "\n"
+        f"👋 Bienvenido, *{nombre}*\n"
+        "\n"
+        f"💵 *Saldo:* ${saldo:.2f}\n"
+        f"📈 *Invertido:* ${invertido:.2f}\n"
+        f"💎 *Ganancias:* ${ganancias:.2f}\n"
+        "\n"
+        "Selecciona una opción:"
+    )
 
 
 # =========================================================
@@ -127,16 +369,34 @@ async def start_command(
 
     nombre = user.first_name or "Usuario"
 
-    texto = (
-        "💰 *PLATAFORMA DE INVERSIÓN*\n"
-        "\n"
-        f"👋 Bienvenido, *{nombre}*\n"
-        "\n"
-        "💵 *Saldo:* $0.00\n"
-        "📈 *Invertido:* $0.00\n"
-        "💎 *Ganancias:* $0.00\n"
-        "\n"
-        "Selecciona una opción:"
+    username = user.username or ""
+
+    telegram_id = user.id
+
+    # Registrar o actualizar usuario.
+
+    nuevo = registrar_usuario(
+        telegram_id,
+        nombre,
+        username
+    )
+
+    if nuevo:
+
+        print(
+            f"👤 Nuevo usuario registrado: "
+            f"{nombre} | {telegram_id}"
+        )
+
+    else:
+
+        print(
+            f"🔄 Usuario actualizado: "
+            f"{nombre} | {telegram_id}"
+        )
+
+    texto = texto_inicio(
+        telegram_id
     )
 
     await update.message.reply_text(
@@ -159,260 +419,19 @@ async def boton_callback(
 
     await query.answer()
 
+    telegram_id = query.from_user.id
+
     accion = query.data
 
-    # -----------------------------------------------------
-    # MI CUENTA
-    # -----------------------------------------------------
 
-    if accion == "cuenta":
+    # =====================================================
+    # INICIO
+    # =====================================================
 
-        user = query.from_user
+    if accion == "inicio":
 
-        texto = (
-            "👤 *MI CUENTA*\n"
-            "\n"
-            f"👤 Nombre: {user.first_name or 'Sin nombre'}\n"
-            f"🆔 ID: `{user.id}`\n"
-            f"🔗 Usuario: @{user.username or 'Sin usuario'}\n"
-            "\n"
-            "💵 Saldo: $0.00\n"
-            "📈 Invertido: $0.00\n"
-            "💎 Ganancias: $0.00"
-        )
-
-        teclado = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Volver",
-                    callback_data="inicio"
-                )
-            ]
-        ]
-
-        await query.edit_message_text(
-            texto,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(teclado)
-        )
-
-
-    # -----------------------------------------------------
-    # INVERSIONES
-    # -----------------------------------------------------
-
-    elif accion == "inversiones":
-
-        texto = (
-            "📈 *INVERSIONES*\n"
-            "\n"
-            "Actualmente no tienes inversiones activas.\n"
-            "\n"
-            "Los planes de inversión se configurarán "
-            "en la siguiente etapa."
-        )
-
-        teclado = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Volver",
-                    callback_data="inicio"
-                )
-            ]
-        ]
-
-        await query.edit_message_text(
-            texto,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(teclado)
-        )
-
-
-    # -----------------------------------------------------
-    # DEPOSITAR
-    # -----------------------------------------------------
-
-    elif accion == "depositar":
-
-        texto = (
-            "💰 *DEPOSITAR*\n"
-            "\n"
-            "La función de depósitos será configurada "
-            "en la siguiente etapa.\n"
-            "\n"
-            "Aquí posteriormente mostraremos:\n"
-            "• Dirección de wallet\n"
-            "• Red disponible\n"
-            "• Cantidad a depositar\n"
-            "• Hash de transacción\n"
-            "• Confirmación del administrador"
-        )
-
-        teclado = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Volver",
-                    callback_data="inicio"
-                )
-            ]
-        ]
-
-        await query.edit_message_text(
-            texto,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(teclado)
-        )
-
-
-    # -----------------------------------------------------
-    # RETIRAR
-    # -----------------------------------------------------
-
-    elif accion == "retirar":
-
-        texto = (
-            "💸 *RETIRAR*\n"
-            "\n"
-            "La función de retiros será configurada "
-            "en la siguiente etapa.\n"
-            "\n"
-            "Aquí posteriormente el usuario podrá "
-            "solicitar un retiro."
-        )
-
-        teclado = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Volver",
-                    callback_data="inicio"
-                )
-            ]
-        ]
-
-        await query.edit_message_text(
-            texto,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(teclado)
-        )
-
-
-    # -----------------------------------------------------
-    # REFERIDOS
-    # -----------------------------------------------------
-
-    elif accion == "referidos":
-
-        texto = (
-            "👥 *REFERIDOS*\n"
-            "\n"
-            "Sistema de referidos próximamente.\n"
-            "\n"
-            "Aquí posteriormente aparecerán:\n"
-            "• Tu enlace de referido\n"
-            "• Cantidad de referidos\n"
-            "• Bonificaciones\n"
-            "• Historial"
-        )
-
-        teclado = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Volver",
-                    callback_data="inicio"
-                )
-            ]
-        ]
-
-        await query.edit_message_text(
-            texto,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(teclado)
-        )
-
-
-    # -----------------------------------------------------
-    # HISTORIAL
-    # -----------------------------------------------------
-
-    elif accion == "historial":
-
-        texto = (
-            "📜 *HISTORIAL*\n"
-            "\n"
-            "Todavía no existen movimientos."
-        )
-
-        teclado = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Volver",
-                    callback_data="inicio"
-                )
-            ]
-        ]
-
-        await query.edit_message_text(
-            texto,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(teclado)
-        )
-
-
-    # -----------------------------------------------------
-    # INFORMACIÓN
-    # -----------------------------------------------------
-
-    elif accion == "informacion":
-
-        texto = (
-            "ℹ️ *INFORMACIÓN*\n"
-            "\n"
-            "Bienvenido a nuestra plataforma.\n"
-            "\n"
-            "Desde este bot podrás gestionar tu "
-            "cuenta, depósitos, inversiones, retiros "
-            "y referidos.\n"
-            "\n"
-            "⚠️ Esta versión es únicamente una prueba "
-            "del funcionamiento del bot."
-        )
-
-        teclado = [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Volver",
-                    callback_data="inicio"
-                )
-            ]
-        ]
-
-        await query.edit_message_text(
-            texto,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(teclado)
-        )
-
-
-    # -----------------------------------------------------
-    # VOLVER AL INICIO
-    # -----------------------------------------------------
-
-    elif accion == "inicio":
-
-        user = query.from_user
-
-        nombre = user.first_name or "Usuario"
-
-        texto = (
-            "💰 *PLATAFORMA DE INVERSIÓN*\n"
-            "\n"
-            f"👋 Bienvenido, *{nombre}*\n"
-            "\n"
-            "💵 *Saldo:* $0.00\n"
-            "📈 *Invertido:* $0.00\n"
-            "💎 *Ganancias:* $0.00\n"
-            "\n"
-            "Selecciona una opción:"
+        texto = texto_inicio(
+            telegram_id
         )
 
         await query.edit_message_text(
@@ -422,22 +441,339 @@ async def boton_callback(
         )
 
 
+    # =====================================================
+    # MI CUENTA
+    # =====================================================
+
+    elif accion == "cuenta":
+
+        usuario = obtener_usuario(
+            telegram_id
+        )
+
+        if not usuario:
+
+            await query.edit_message_text(
+                "❌ No se encontró tu cuenta.",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Volver",
+                            callback_data="inicio"
+                        )
+                    ]
+                ])
+            )
+
+            return
+
+        nombre = usuario[2] or "Sin nombre"
+
+        username = usuario[3]
+
+        saldo = usuario[4] or 0
+
+        invertido = usuario[5] or 0
+
+        ganancias = usuario[6] or 0
+
+        codigo = usuario[7] or "N/A"
+
+        fecha = usuario[9] or "N/A"
+
+        if username:
+
+            username_text = (
+                f"@{username}"
+            )
+
+        else:
+
+            username_text = (
+                "Sin usuario"
+            )
+
+        texto = (
+            "👤 *MI CUENTA*\n"
+            "\n"
+            f"👤 *Nombre:* {nombre}\n"
+            f"🧑‍💻 *Usuario:* {username_text}\n"
+            f"🆔 *ID:* `{telegram_id}`\n"
+            "\n"
+            f"💵 *Saldo:* ${saldo:.2f}\n"
+            f"📈 *Invertido:* ${invertido:.2f}\n"
+            f"💎 *Ganancias:* ${ganancias:.2f}\n"
+            "\n"
+            f"🔗 *Código de referido:* `{codigo}`\n"
+            f"📅 *Registro:* {fecha}"
+        )
+
+        teclado = [
+
+            [
+                InlineKeyboardButton(
+                    "⬅️ Volver",
+                    callback_data="inicio"
+                )
+            ]
+
+        ]
+
+        await query.edit_message_text(
+            texto,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                teclado
+            )
+        )
+
+
+    # =====================================================
+    # INVERSIONES
+    # =====================================================
+
+    elif accion == "inversiones":
+
+        texto = (
+            "📈 *INVERSIONES*\n"
+            "\n"
+            "Actualmente no tienes inversiones activas.\n"
+            "\n"
+            "Los planes de inversión se "
+            "configurarán en la siguiente etapa."
+        )
+
+        teclado = [
+
+            [
+                InlineKeyboardButton(
+                    "⬅️ Volver",
+                    callback_data="inicio"
+                )
+            ]
+
+        ]
+
+        await query.edit_message_text(
+            texto,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                teclado
+            )
+        )
+
+
+    # =====================================================
+    # DEPOSITAR
+    # =====================================================
+
+    elif accion == "depositar":
+
+        texto = (
+            "💰 *DEPOSITAR*\n"
+            "\n"
+            "La función de depósitos será "
+            "configurada en la siguiente etapa.\n"
+            "\n"
+            "Aquí posteriormente podremos "
+            "mostrar la información necesaria "
+            "para solicitar un depósito."
+        )
+
+        teclado = [
+
+            [
+                InlineKeyboardButton(
+                    "⬅️ Volver",
+                    callback_data="inicio"
+                )
+            ]
+
+        ]
+
+        await query.edit_message_text(
+            texto,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                teclado
+            )
+        )
+
+
+    # =====================================================
+    # RETIRAR
+    # =====================================================
+
+    elif accion == "retirar":
+
+        texto = (
+            "💸 *RETIRAR*\n"
+            "\n"
+            "La función de retiros será "
+            "configurada en la siguiente etapa."
+        )
+
+        teclado = [
+
+            [
+                InlineKeyboardButton(
+                    "⬅️ Volver",
+                    callback_data="inicio"
+                )
+            ]
+
+        ]
+
+        await query.edit_message_text(
+            texto,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                teclado
+            )
+        )
+
+
+    # =====================================================
+    # REFERIDOS
+    # =====================================================
+
+    elif accion == "referidos":
+
+        usuario = obtener_usuario(
+            telegram_id
+        )
+
+        codigo = "N/A"
+
+        if usuario:
+
+            codigo = usuario[7] or "N/A"
+
+        texto = (
+            "👥 *REFERIDOS*\n"
+            "\n"
+            f"🔗 *Tu código:* `{codigo}`\n"
+            "\n"
+            "El sistema de referidos será "
+            "activado en una próxima etapa."
+        )
+
+        teclado = [
+
+            [
+                InlineKeyboardButton(
+                    "⬅️ Volver",
+                    callback_data="inicio"
+                )
+            ]
+
+        ]
+
+        await query.edit_message_text(
+            texto,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                teclado
+            )
+        )
+
+
+    # =====================================================
+    # HISTORIAL
+    # =====================================================
+
+    elif accion == "historial":
+
+        texto = (
+            "📜 *HISTORIAL*\n"
+            "\n"
+            "Todavía no existen movimientos "
+            "registrados en tu cuenta."
+        )
+
+        teclado = [
+
+            [
+                InlineKeyboardButton(
+                    "⬅️ Volver",
+                    callback_data="inicio"
+                )
+            ]
+
+        ]
+
+        await query.edit_message_text(
+            texto,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                teclado
+            )
+        )
+
+
+    # =====================================================
+    # INFORMACIÓN
+    # =====================================================
+
+    elif accion == "informacion":
+
+        texto = (
+            "ℹ️ *INFORMACIÓN*\n"
+            "\n"
+            "Bienvenido a nuestra plataforma.\n"
+            "\n"
+            "Desde este bot podrás gestionar "
+            "tu cuenta, depósitos, inversiones, "
+            "retiros y referidos.\n"
+            "\n"
+            "⚠️ Esta versión corresponde a la "
+            "etapa inicial de desarrollo."
+        )
+
+        teclado = [
+
+            [
+                InlineKeyboardButton(
+                    "⬅️ Volver",
+                    callback_data="inicio"
+                )
+            ]
+
+        ]
+
+        await query.edit_message_text(
+            texto,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                teclado
+            )
+        )
+
+
 # =========================================================
 # MAIN
-# MISMO SISTEMA DEL BOT DE RIFA
 # =========================================================
 
 async def main():
 
-    # 1. Levanta el servidor web
+    # Crear base de datos automáticamente.
+
+    inicializar_base_datos()
+
+    # Levantar servidor web.
+
     await start_web_server()
 
-    # 2. Crea el bot
-    app = ApplicationBuilder().token(
-        TELEGRAM_TOKEN
-    ).build()
+    # Crear aplicación de Telegram.
 
-    # 3. Comando /start
+    app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_TOKEN)
+        .build()
+    )
+
+    # /start
+
     app.add_handler(
         CommandHandler(
             "start",
@@ -445,7 +781,8 @@ async def main():
         )
     )
 
-    # 4. Botones
+    # Botones
+
     app.add_handler(
         CallbackQueryHandler(
             boton_callback
@@ -456,18 +793,23 @@ async def main():
         "🤖 Bot de Inversión iniciado correctamente..."
     )
 
-    # 5. Inicia Telegram
+    # Inicializar Telegram.
+
     await app.initialize()
+
     await app.start()
+
     await app.updater.start_polling()
 
-    # 6. Mantiene el proceso activo
+    # Mantener proceso activo.
+
     await asyncio.Event().wait()
 
 
 # =========================================================
-# EJECUCIÓN
+# EJECUTAR
 # =========================================================
 
 if __name__ == "__main__":
+
     asyncio.run(main())
