@@ -26,7 +26,8 @@ import aiohttp
 from aiohttp import web
 from dotenv import load_dotenv
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile,
+    ReplyKeyboardMarkup, KeyboardButton
 )
 from telegram.ext import (
     Application, ApplicationBuilder, CallbackQueryHandler, CommandHandler,
@@ -318,17 +319,32 @@ async def start_web_server():
     log.info("Servidor web activo en puerto %s", PORT)
 
 
+ADMIN_MENU_ACTIONS = {
+    "➕ Crear lista": "create",
+    "📋 Listas activas": "active",
+    "📊 Estadísticas": "stats",
+    "🏆 Indicar ganador": "winner",
+    "🔄 Resetear lista": "reset",
+    "💾 Crear respaldo": "backup",
+    "♻️ Restaurar respaldo": "restore",
+    "👥 Historial": "history",
+    "🔄 Actualizar panel": "back",
+}
+
 def admin_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Crear lista", callback_data="admin:create")],
-        [InlineKeyboardButton("📋 Listas activas", callback_data="admin:active")],
-        [InlineKeyboardButton("📊 Consultar estadísticas por lista", callback_data="admin:stats")],
-        [InlineKeyboardButton("🏆 Indicar ganador", callback_data="admin:winner")],
-        [InlineKeyboardButton("🔄 Resetear lista", callback_data="admin:reset")],
-        [InlineKeyboardButton("💾 Crear respaldo", callback_data="admin:backup")],
-        [InlineKeyboardButton("♻️ Restaurar respaldo", callback_data="admin:restore")],
-        [InlineKeyboardButton("👥 Historial de participantes", callback_data="admin:history")]
-    ])
+    """Teclado persistente del administrador; permanece visible en el chat privado."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("➕ Crear lista"), KeyboardButton("📋 Listas activas")],
+            [KeyboardButton("📊 Estadísticas"), KeyboardButton("🏆 Indicar ganador")],
+            [KeyboardButton("🔄 Resetear lista"), KeyboardButton("👥 Historial")],
+            [KeyboardButton("💾 Crear respaldo"), KeyboardButton("♻️ Restaurar respaldo")],
+            [KeyboardButton("🔄 Actualizar panel")],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Selecciona una opción de administración"
+    )
 
 
 def admin_back_keyboard():
@@ -388,6 +404,12 @@ async def lists_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == "private" and is_admin(update.effective_user.id):
+        await update.effective_message.reply_text(
+            "⚙️ PANEL DE ADMINISTRACIÓN\nSelecciona una opción. Los botones permanecerán visibles aquí:",
+            reply_markup=admin_keyboard()
+        )
+        return
     raffles = active_raffles(update.effective_chat.id)
     if not raffles:
         await update.effective_message.reply_text("No hay listas activas en este grupo.")
@@ -446,7 +468,7 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("Por seguridad, abre el chat privado del bot y escribe /admin.")
         return
     await update.effective_message.reply_text(
-        "⚙️ PANEL DE ADMINISTRACIÓN\nSelecciona una operación:",
+        "⚙️ PANEL DE ADMINISTRACIÓN\nSelecciona una operación. Los botones permanecerán visibles aquí:",
         reply_markup=admin_keyboard()
     )
 
@@ -607,7 +629,7 @@ async def process_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"✅ *Lista creada correctamente*\n\nID: *#{rid}*\nNombre: *{flow['name']}*\n"
                 f"Números: *{flow['total']}*\nValor por número: *{flow['price']:.2f} {CURRENCY}*\n"
                 f"Premio: *{flow['prize']}*\nValor del premio: *{flow['prize_value']}*\nGrupo: `{group}`",
-                parse_mode="Markdown", reply_markup=admin_back_keyboard()
+                parse_mode="Markdown", reply_markup=admin_keyboard()
             )
             return True
         elif step == "winner_raffle":
@@ -633,17 +655,112 @@ async def process_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except (ValueError, InvalidOperation):
         await msg.reply_text("Ese dato no es válido. Inténtalo de nuevo.")
         return True
-    await msg.reply_text(admin_flow_prompt(flow["step"]), parse_mode="Markdown")
+    await msg.reply_text(admin_flow_prompt(flow["step"]), parse_mode="Markdown", reply_markup=admin_keyboard())
     return True
+
+
+async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str):
+    """Ejecuta las opciones del teclado fijo sin exigir comandos ni botones inline."""
+    msg = update.effective_message
+    if not is_admin(update.effective_user.id) or update.effective_chat.type != "private":
+        await msg.reply_text("⛔ No autorizado.")
+        return
+
+    if action != "create":
+        context.user_data.pop("admin_flow", None)
+    if action == "create":
+        context.user_data["admin_flow"] = {"kind": "create", "step": "name"}
+        await msg.reply_text(admin_flow_prompt("name"), parse_mode="Markdown", reply_markup=admin_keyboard())
+    elif action == "active":
+        with db() as con:
+            rows = [dict(r) for r in con.execute(
+                "SELECT * FROM raffles WHERE status='active' ORDER BY id"
+            ).fetchall()]
+        if not rows:
+            result = "No hay listas activas registradas."
+        else:
+            blocks = []
+            for item in rows:
+                st = stats(item["id"])
+                blocks.append(
+                    f"🎟️ *{item['name']}* (#{item['id']})\n"
+                    f"Números: {st['total']} · Precio: {st['price']:.2f} {CURRENCY}\n"
+                    f"Premio: {item['prize'] or 'Por anunciar'} · Valor: {item.get('prize_value') or 'Por definir'}\n"
+                    f"Ocupados: {st['occupied']} · Pendientes: {st['pending']} · Libres: {st['available']}\n"
+                    f"Recaudado: {st['revenue']:.2f} {CURRENCY} · Grupo: {item['group_id']}"
+                )
+            result = "📋 *LISTAS ACTIVAS*\n\n" + "\n\n".join(blocks)
+        await msg.reply_text(result, parse_mode="Markdown", reply_markup=admin_keyboard())
+    elif action == "stats":
+        with db() as con:
+            rows = [dict(r) for r in con.execute(
+                "SELECT * FROM raffles WHERE status='active' ORDER BY id"
+            ).fetchall()]
+        if not rows:
+            await msg.reply_text("No hay listas activas.", reply_markup=admin_keyboard())
+        else:
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton(f"📊 {r['name']} (#{r['id']})", callback_data=f"adminstats:{r['id']}")] for r in rows]
+            )
+            await msg.reply_text("Selecciona la lista que quieres revisar:", reply_markup=keyboard)
+    elif action == "winner":
+        with db() as con:
+            rows = [dict(r) for r in con.execute(
+                "SELECT * FROM raffles WHERE status='active' ORDER BY id"
+            ).fetchall()]
+        if not rows:
+            await msg.reply_text("No hay listas activas para declarar ganador.", reply_markup=admin_keyboard())
+        else:
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton(f"🏆 {r['name']} (#{r['id']})", callback_data=f"winnerchoose:{r['id']}")] for r in rows]
+            )
+            await msg.reply_text("¿En cuál lista vas a indicar el ganador?", reply_markup=keyboard)
+    elif action == "reset":
+        with db() as con:
+            rows = con.execute("SELECT id,name,status FROM raffles ORDER BY id DESC LIMIT 50").fetchall()
+        if not rows:
+            await msg.reply_text("No hay listas registradas.", reply_markup=admin_keyboard())
+        else:
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton(f"🔄 {r['name']} (#{r['id']}) · {r['status']}", callback_data=f"resetchoose:{r['id']}")] for r in rows]
+            )
+            await msg.reply_text(
+                "Selecciona la lista que deseas reiniciar. El historial de compras se conserva.",
+                reply_markup=keyboard
+            )
+    elif action == "backup":
+        await send_backup(update, context)
+    elif action == "restore":
+        context.user_data["awaiting_restore"] = True
+        await msg.reply_text(
+            "Envía aquí el archivo de respaldo *.json*. El sistema lo validará y te pedirá confirmación.",
+            parse_mode="Markdown", reply_markup=admin_keyboard()
+        )
+    elif action == "history":
+        await send_history(update, context)
+    elif action == "back":
+        context.user_data.pop("admin_flow", None)
+        await msg.reply_text(
+            "⚙️ *PANEL DE ADMINISTRACIÓN*\nSelecciona una operación:",
+            parse_mode="Markdown", reply_markup=admin_keyboard()
+        )
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg or not msg.text or msg.text.startswith("/"):
         return
+    text = msg.text.strip()
+
+    # Panel fijo: solo responde en el chat privado y al administrador autorizado.
+    if update.effective_chat.type == "private" and is_admin(update.effective_user.id):
+        action = ADMIN_MENU_ACTIONS.get(text)
+        if action:
+            await admin_menu_action(update, context, action)
+            return
+
     if await process_admin_flow(update, context):
         return
-    text = msg.text.strip()
     if text.lower() == "lista":
         selected_id = context.user_data.get("selected_raffle_id")
         selected = get_raffle(selected_id) if selected_id else None
@@ -921,7 +1038,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action = data.split(":", 1)[1]
         if action == "create":
             context.user_data["admin_flow"] = {"kind": "create", "step": "name"}
-            await q.message.reply_text(admin_flow_prompt("name"), parse_mode="Markdown")
+            await q.message.reply_text(admin_flow_prompt("name"), parse_mode="Markdown", reply_markup=admin_keyboard())
         elif action == "active":
             with db() as con:
                 rows = [dict(r) for r in con.execute("SELECT * FROM raffles WHERE status='active' ORDER BY id").fetchall()]
@@ -1063,7 +1180,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def send_backup(update, context):
     if update.effective_chat.type != "private":
-        await update.callback_query.answer("Abre el panel en privado para crear la copia.", show_alert=True)
+        if update.callback_query:
+            await update.callback_query.answer("Abre el panel en privado para crear la copia.", show_alert=True)
+        else:
+            await update.effective_message.reply_text("Abre el panel en privado para crear la copia.")
         return
     await send_excel(update, context)
     await send_json(update, context)
@@ -1071,7 +1191,10 @@ async def send_backup(update, context):
 
 async def send_excel(update, context):
     if update.effective_chat.type != "private":
-        await update.callback_query.answer("Abre el panel en privado para descargar el archivo.", show_alert=True)
+        if update.callback_query:
+            await update.callback_query.answer("Abre el panel en privado para descargar el archivo.", show_alert=True)
+        else:
+            await update.effective_message.reply_text("Abre el panel en privado para descargar el archivo.")
         return
     try:
         from openpyxl import Workbook
@@ -1118,12 +1241,16 @@ async def send_excel(update, context):
         )
     except Exception as e:
         log.exception("Error exportando Excel")
-        await update.callback_query.message.reply_text(f"No se pudo crear el Excel: {e}")
+        target = update.callback_query.message if update.callback_query else update.effective_message
+        await target.reply_text(f"No se pudo crear el Excel: {e}")
 
 
 async def send_json(update, context):
     if update.effective_chat.type != "private":
-        await update.callback_query.answer("Abre el panel en privado para descargar el archivo.", show_alert=True)
+        if update.callback_query:
+            await update.callback_query.answer("Abre el panel en privado para descargar el archivo.", show_alert=True)
+        else:
+            await update.effective_message.reply_text("Abre el panel en privado para descargar el archivo.")
         return
     with db() as con:
         data = {}
@@ -1153,7 +1280,8 @@ async def send_history(update, context):
             f"{r['numbers_json']} · {r['amount']:.2f} {CURRENCY} · {r['status']}"
             for r in rows
         )
-    await update.callback_query.message.reply_text(text, parse_mode="Markdown")
+    target = update.callback_query.message if update.callback_query else update.effective_message
+    await target.reply_text(text, parse_mode="Markdown", reply_markup=admin_keyboard())
 
 
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1369,6 +1497,17 @@ def db_raffles_for_draw():
 async def post_init(app: Application):
     asyncio.create_task(expire_reservations(app))
     asyncio.create_task(pick3_monitor(app))
+    try:
+        await app.bot.send_message(
+            chat_id=ADMIN_ID,
+            text="⚙️ PANEL DE ADMINISTRACIÓN\nEl panel está listo. Usa estos botones para administrar las rifas:",
+            reply_markup=admin_keyboard()
+        )
+    except Exception:
+        log.warning(
+            "No se pudo enviar automáticamente el panel al administrador. "
+            "Abre el chat privado del bot y pulsa Iniciar para habilitar los mensajes."
+        )
 
 
 
