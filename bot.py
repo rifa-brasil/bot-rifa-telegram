@@ -48,7 +48,7 @@ DB_PATH = os.getenv("DB_PATH", "rifas.sqlite3")
 PORT = int(os.getenv("PORT", "10000"))
 RESERVATION_MINUTES = 5  # Primera ventana: 5 min para realizar el pago
 PAY_BUTTON_MINUTES = 5   # Segunda ventana: 5 min para avisar que ya pagó
-CURRENCY = os.getenv("CURRENCY", "USD")
+CURRENCY = "R$"  # Todos los valores de la rifa se expresan en reales brasileños
 FLORIDA_PICK3_PDF = "https://files.floridalottery.com/exptkt/p3.pdf"
 PICK3_AUTO_ANNOUNCE = os.getenv("PICK3_AUTO_ANNOUNCE", "false").lower() == "true"
 PICK3_DRAW = os.getenv("PICK3_DRAW", "E").upper()  # M=mediodía, E=noche
@@ -354,11 +354,9 @@ def admin_back_keyboard():
 def admin_flow_prompt(step):
     prompts = {
         "name": "Escribe el *nombre* de la nueva lista:",
-        "total": "¿Cuántos números tendrá? (entre 1 y 10000)",
-        "price": f"¿Cuál será el *valor por número* en {CURRENCY}? Escribe 5 o 5.50.",
+        "price": "¿Cuál será el *valor de cada número* en reales (R$)? Ejemplo: 15 o 15,50.",
         "prize": "Describe el *premio* que se entregará:",
-        "prize_value": "¿Cuál es el *valor del premio*? Puedes escribir el importe o una descripción.",
-        "group": f"ID del grupo donde se publicará la lista. Envía el ID o escribe *usar configurado* ({DEFAULT_GROUP_ID})."
+        "prize_value": "¿Qué *porcentaje del total recaudado* será el valor del premio? Escribe, por ejemplo, 80 o 80%. La lista tiene 100 números."
     }
     return prompts[step]
 
@@ -474,40 +472,49 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def new_raffle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Creación rápida: /nueva Nombre|precio_por_numero|premio|porcentaje"""
     if not is_admin(update.effective_user.id):
         return
-    # Uso: /nueva Nombre|cantidad|precio|group_id|premio
     raw = " ".join(context.args)
     parts = [x.strip() for x in raw.split("|")]
     if len(parts) < 4:
         await update.effective_message.reply_text(
-            "Uso: /nueva Lista 2|100|5|-100123456789|Premio|Valor del premio\n"
-            "El group_id debe ser el ID numérico del grupo."
+            "Uso: /nueva Nombre de lista|15|Descripción del premio|80%\n"
+            "La lista se crea automáticamente con 100 números y el grupo configurado."
         )
         return
     try:
-        name, total, price, group = parts[:4]
-        prize = parts[4] if len(parts) > 4 else ""
-        prize_value = parts[5] if len(parts) > 5 else ""
-        total, price, group = int(total), float(Decimal(price)), int(group)
-        if not name or not 1 <= total <= 10000 or price < 0:
+        name, price_text, prize, percent_text = parts[:4]
+        price = Decimal(price_text.replace(",", "."))
+        percent = Decimal(percent_text.replace("%", "").replace(",", "."))
+        if not name or price < 0 or not Decimal("0") <= percent <= Decimal("100"):
             raise ValueError()
+        amount = (price * Decimal("100") * percent / Decimal("100")).quantize(Decimal("0.01"))
+        amount_fmt = f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        prize_value = f"R$ {amount_fmt} ({percent}% do total)"
+        group = DEFAULT_GROUP_ID
+        if group == 0:
+            await update.effective_message.reply_text("El ID del grupo configurado (GROUP_CHAT_ID) es 0. Configúralo en el entorno del bot.")
+            return
     except (ValueError, InvalidOperation):
-        await update.effective_message.reply_text("Datos inválidos. Revisa cantidad, precio e ID del grupo.")
+        await update.effective_message.reply_text("Datos inválidos. Revisa el precio y el porcentaje (0 a 100).")
         return
     with db() as con:
         cur = con.execute(
             """INSERT INTO raffles(name,group_id,total_numbers,price,prize,prize_value,status,created_at)
-               VALUES(?,?,?,?,?,?,'active',?)""",
-            (name, group, total, price, prize, prize_value, iso_now())
+               VALUES(?,?,100,?,?,?,'active',?)""",
+            (name, group, float(price), prize, prize_value, iso_now())
         )
         rid = cur.lastrowid
         con.executemany(
             "INSERT INTO numbers(raffle_id,number,status,updated_at) VALUES(?,?,?,?)",
-            [(rid, n, "available", iso_now()) for n in range(1, total + 1)]
+            [(rid, n, "available", iso_now()) for n in range(1, 101)]
         )
     audit("new_raffle", f"Rifa #{rid}: {name}", update.effective_user.id)
-    await update.effective_message.reply_text(f"✅ Rifa #{rid} creada: {name} ({total} números).")
+    await update.effective_message.reply_text(
+        f"✅ Lista #{rid} creada: {name} (100 números, del 1 al 100).\n"
+        f"Precio por número: R$ {float(price):.2f}\nPremio calculado: {prize_value}"
+    )
 
 
 async def publish_winner(update, context, raffle_id, number):
@@ -583,12 +590,8 @@ async def process_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 await msg.reply_text("Escribe un nombre válido (máximo 100 caracteres).")
                 return True
             flow["name"] = value
-            flow["step"] = "total"
-        elif step == "total":
-            total = int(value)
-            if not 1 <= total <= 10000:
-                raise ValueError()
-            flow["total"] = total
+            flow["total"] = 100
+            flow["group"] = DEFAULT_GROUP_ID
             flow["step"] = "price"
         elif step == "price":
             price = float(Decimal(value.replace(",", ".")))
@@ -604,14 +607,20 @@ async def process_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
         elif step == "prize_value":
             if not value:
                 raise ValueError()
-            flow["prize_value"] = value
-            flow["step"] = "group"
-        elif step == "group":
-            group = DEFAULT_GROUP_ID if value.lower() in {"usar configurado", "usar", "default"} else int(value)
+            percent_text = value.strip().replace("%", "").replace(",", ".")
+            percent = Decimal(percent_text)
+            if not Decimal("0") <= percent <= Decimal("100"):
+                raise ValueError()
+            prize_amount = Decimal(str(flow["price"])) * Decimal("100") * percent / Decimal("100")
+            prize_amount = prize_amount.quantize(Decimal("0.01"))
+            # Formato monetario brasileño: punto de miles y coma decimal.
+            amount_fmt = f"{prize_amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            flow["prize_percent"] = percent
+            flow["prize_value"] = f"R$ {amount_fmt} ({percent}% do total)"
+            group = DEFAULT_GROUP_ID
             if group == 0:
-                await msg.reply_text("El ID configurado es 0. Envía el ID numérico del grupo.")
+                await msg.reply_text("El ID del grupo configurado (GROUP_CHAT_ID) es 0. Configúralo en el entorno del bot.")
                 return True
-            flow["group"] = group
             with db() as con:
                 cur = con.execute(
                     """INSERT INTO raffles(name,group_id,total_numbers,price,prize,prize_value,status,created_at)
@@ -628,7 +637,7 @@ async def process_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await msg.reply_text(
                 f"✅ *Lista creada correctamente*\n\nID: *#{rid}*\nNombre: *{flow['name']}*\n"
                 f"Números: *{flow['total']}*\nValor por número: *{flow['price']:.2f} {CURRENCY}*\n"
-                f"Premio: *{flow['prize']}*\nValor del premio: *{flow['prize_value']}*\nGrupo: `{group}`",
+                f"Premio: *{flow['prize']}*\nValor del premio calculado: *{flow['prize_value']}*",
                 parse_mode="Markdown", reply_markup=admin_keyboard()
             )
             return True
