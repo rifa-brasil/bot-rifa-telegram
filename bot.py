@@ -201,21 +201,7 @@ def init_db():
                 )
             except Exception:
                 log.exception("No se pudo migrar el importe de la solicitud antigua %s", legacy["id"])
-        count = con.execute("SELECT COUNT(*) FROM raffles").fetchone()[0]
-        if count == 0:
-            group_id = DEFAULT_GROUP_ID
-            cur = con.execute(
-                """INSERT INTO raffles(name,group_id,total_numbers,price,prize,status,created_at)
-                   VALUES(?,?,?,?,?,?,?)""",
-                ("Rifa principal", group_id, 100,
-                 float(os.getenv("DEFAULT_NUMBER_PRICE", "0")),
-                 os.getenv("DEFAULT_PRIZE", ""), "active", iso_now())
-            )
-            rid = cur.lastrowid
-            con.executemany(
-                "INSERT INTO numbers(raffle_id,number,status,updated_at) VALUES(?,?,?,?)",
-                [(rid, n, "available", iso_now()) for n in range(1, 101)]
-            )
+        # No crear rifas ficticias automáticamente: las listas se crean desde /admin.
 
 
 def audit(action, details, admin_id=None):
@@ -334,14 +320,31 @@ async def start_web_server():
 
 def admin_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Estado y estadísticas", callback_data="admin:stats")],
-        [InlineKeyboardButton("🎟️ Administrar rifas", callback_data="admin:raffles")],
-        [InlineKeyboardButton("🏆 Dar número ganador", callback_data="admin:helpwinner")],
+        [InlineKeyboardButton("➕ Crear lista", callback_data="admin:create")],
+        [InlineKeyboardButton("📋 Listas activas", callback_data="admin:active")],
+        [InlineKeyboardButton("📊 Consultar estadísticas por lista", callback_data="admin:stats")],
+        [InlineKeyboardButton("🏆 Indicar ganador", callback_data="admin:winner")],
         [InlineKeyboardButton("🔄 Resetear lista", callback_data="admin:reset")],
-        [InlineKeyboardButton("💾 Crear copia de seguridad (Excel + JSON)", callback_data="admin:backup")],
-        [InlineKeyboardButton("♻️ Restaurar base de datos", callback_data="admin:restore")],
+        [InlineKeyboardButton("💾 Crear respaldo", callback_data="admin:backup")],
+        [InlineKeyboardButton("♻️ Restaurar respaldo", callback_data="admin:restore")],
         [InlineKeyboardButton("👥 Historial de participantes", callback_data="admin:history")]
     ])
+
+
+def admin_back_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Volver al panel", callback_data="admin:back")]])
+
+
+def admin_flow_prompt(step):
+    prompts = {
+        "name": "Escribe el *nombre* de la nueva lista:",
+        "total": "¿Cuántos números tendrá? (entre 1 y 10000)",
+        "price": f"¿Cuál será el *valor por número* en {CURRENCY}? Escribe 5 o 5.50.",
+        "prize": "Describe el *premio* que se entregará:",
+        "prize_value": "¿Cuál es el *valor del premio*? Puedes escribir el importe o una descripción.",
+        "group": f"ID del grupo donde se publicará la lista. Envía el ID o escribe *usar configurado* ({DEFAULT_GROUP_ID})."
+    }
+    return prompts[step]
 
 
 def active_raffles(group_id):
@@ -356,7 +359,7 @@ def active_raffles(group_id):
 def raffle_selector_keyboard(raffles):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(
-            f"{r['name']} · {float(r['price']):.2f} {CURRENCY}",
+            f"{r['name']} · {float(r['price']):.2f} {CURRENCY} · {r['total_numbers']} nums",
             callback_data=f"selectraffle:{r['id']}"
         )] for r in raffles
     ])
@@ -367,8 +370,19 @@ async def lists_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not raffles:
         await update.effective_message.reply_text("No hay listas activas en este grupo.")
         return
+    summaries = []
+    for raffle in raffles:
+        st = stats(raffle["id"])
+        summaries.append(
+            f"🎟️ *{raffle['name']}* (#{raffle['id']})\n"
+            f"🔢 Números: {raffle['total_numbers']} · 💵 Por número: {float(raffle['price']):.2f} {CURRENCY}\n"
+            f"🏆 Premio: {raffle['prize'] or 'Por anunciar'}\n"
+            f"💎 Valor del premio: {raffle.get('prize_value') or 'Por definir'}\n"
+            f"🟢 Libres: {st['available']} · 🔴 Ocupados: {st['occupied']} · 🟡 Pendientes: {st['pending']}"
+        )
     await update.effective_message.reply_text(
-        "🎟️ *Selecciona la lista en la que deseas participar:*",
+        "🎟️ *LISTAS DISPONIBLES*\n\n" + "\n\n".join(summaries) +
+        "\n\n👇 Selecciona la lista en la que deseas participar:",
         parse_mode="Markdown", reply_markup=raffle_selector_keyboard(raffles)
     )
 
@@ -428,6 +442,9 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.effective_message.reply_text("⛔ No autorizado.")
         return
+    if update.effective_chat.type != "private":
+        await update.effective_message.reply_text("Por seguridad, abre el chat privado del bot y escribe /admin.")
+        return
     await update.effective_message.reply_text(
         "⚙️ PANEL DE ADMINISTRACIÓN\nSelecciona una operación:",
         reply_markup=admin_keyboard()
@@ -471,22 +488,10 @@ async def new_raffle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(f"✅ Rifa #{rid} creada: {name} ({total} números).")
 
 
-async def winner_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.effective_message.reply_text("⛔ No autorizado.")
-        return
-    # Uso: /ganador ID_RIFA NUMERO
-    if len(context.args) != 2:
-        await update.effective_message.reply_text("Uso: /ganador ID_RIFA NUMERO")
-        return
-    try:
-        raffle_id, number = int(context.args[0]), int(context.args[1])
-    except ValueError:
-        await update.effective_message.reply_text("El ID y el número deben ser enteros.")
-        return
+async def publish_winner(update, context, raffle_id, number):
     raffle = get_raffle(raffle_id)
     if not raffle or not 1 <= number <= raffle["total_numbers"]:
-        await update.effective_message.reply_text("Rifa o número inválido.")
+        await update.effective_message.reply_text("Lista o número inválido.")
         return
     with db() as con:
         row = con.execute(
@@ -496,55 +501,147 @@ async def winner_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not row:
             await update.effective_message.reply_text("Ese número no está ocupado con un pago aprobado.")
             return
-        if con.execute("SELECT 1 FROM winners WHERE raffle_id=?", (raffle_id,)).fetchone():
-            await update.effective_message.reply_text("Esta rifa ya tiene un ganador registrado.")
+        if raffle["status"] != "active":
+            await update.effective_message.reply_text("Esta lista no está activa. Reiníciala desde el panel antes de declarar otro ganador.")
             return
         cur = con.execute(
-            """INSERT INTO winners(raffle_id,number,user_id,name,announced_at)
-               VALUES(?,?,?,?,?)""",
+            "INSERT INTO winners(raffle_id,number,user_id,name,announced_at) VALUES(?,?,?,?,?)",
             (raffle_id, number, row["user_id"], row["name"], iso_now())
         )
         winner_id = cur.lastrowid
-        con.execute("UPDATE raffles SET status='finished',closed_at=? WHERE id=?",
-                    (iso_now(), raffle_id))
-    mention = f"[{row['name']}](tg://user?id={row['user_id']})"
+        con.execute("UPDATE raffles SET status='finished',closed_at=? WHERE id=?", (iso_now(), raffle_id))
+    mention = f"[{row['name']}](tg://user?id={row['user_id']})" if row["user_id"] else row["name"]
     msg = (
         f"🏆 *¡RESULTADO OFICIAL DE LA RIFA!* 🏆\n\n"
-        f"🎟️ Rifa: *{raffle['name']}*\n"
-        f"🎯 Número ganador: *{number:02d}*\n"
-        f"🎉 Ganador: {mention}\n\n"
-        "Cuando recibas tu premio, pulsa el botón *Premio Recibido*."
+        f"🎟️ Lista: *{raffle['name']}*\n🎯 Número ganador: *{number:02d}*\n"
+        f"🎉 Ganador: {mention}\n\nCuando recibas tu premio, pulsa el botón *Premio Recibido*."
     )
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🏆 Premio Recibido", callback_data=f"prize:{winner_id}")
-    ]])
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏆 Premio Recibido", callback_data=f"prize:{winner_id}")]])
     try:
-        sent = await context.bot.send_message(
-            chat_id=raffle["group_id"], text=msg,
-            parse_mode="Markdown", reply_markup=keyboard
-        )
+        sent = await context.bot.send_message(chat_id=raffle["group_id"], text=msg, parse_mode="Markdown", reply_markup=keyboard)
         with db() as con:
-            con.execute("UPDATE winners SET group_message_id=? WHERE id=?",
-                        (sent.message_id, winner_id))
+            con.execute("UPDATE winners SET group_message_id=? WHERE id=?", (sent.message_id, winner_id))
     except Exception:
         log.exception("No se pudo publicar el ganador en el grupo")
-        await update.effective_message.reply_text(
-            "El ganador quedó registrado, pero no pude publicar en el grupo. "
-            "Comprueba GROUP_CHAT_ID y que el bot sea administrador."
-        )
+        await update.effective_message.reply_text("El ganador quedó registrado, pero no pude publicar en el grupo. Comprueba el ID del grupo y los permisos del bot.")
         return
-    await send_private(
-        row["user_id"],
-        f"¡Felicidades, {row['name']}! Has ganado {raffle['name']} con el número {number:02d}. "
-        "Contacta con el administrador para coordinar la entrega del premio."
-    )
+    private_sent = await send_private(row["user_id"],
+        f"¡Felicidades, {row['name']}! Has ganado {raffle['name']} con el número {number:02d}. Contacta con el administrador para coordinar la entrega del premio.")
     audit("winner", f"Rifa #{raffle_id}, número {number}, usuario {row['user_id']}", update.effective_user.id)
-    await update.effective_message.reply_text("✅ Ganador publicado en el grupo y notificación privada intentada desde la cuenta dedicada.")
+    suffix = "El aviso privado se envió desde la cuenta personal conectada." if private_sent else "No se pudo enviar el privado: revisa la sesión Telethon y que el ganador haya iniciado conversación con esa cuenta."
+    await update.effective_message.reply_text(f"✅ Ganador publicado en el grupo. {suffix}")
+
+
+async def winner_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("⛔ No autorizado.")
+        return
+    if len(context.args) != 2:
+        await update.effective_message.reply_text("Uso: /ganador ID_RIFA NUMERO")
+        return
+    try:
+        raffle_id, number = int(context.args[0]), int(context.args[1])
+    except ValueError:
+        await update.effective_message.reply_text("El ID y el número deben ser enteros.")
+        return
+    await publish_winner(update, context, raffle_id, number)
+
+
+async def process_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Procesa respuestas de los formularios conversacionales del panel privado."""
+    msg = update.effective_message
+    flow = context.user_data.get("admin_flow")
+    if not flow or update.effective_chat.type != "private" or not is_admin(update.effective_user.id):
+        return False
+    value = (msg.text or "").strip()
+    step = flow.get("step")
+    try:
+        if step == "name":
+            if not value or len(value) > 100:
+                await msg.reply_text("Escribe un nombre válido (máximo 100 caracteres).")
+                return True
+            flow["name"] = value
+            flow["step"] = "total"
+        elif step == "total":
+            total = int(value)
+            if not 1 <= total <= 10000:
+                raise ValueError()
+            flow["total"] = total
+            flow["step"] = "price"
+        elif step == "price":
+            price = float(Decimal(value.replace(",", ".")))
+            if price < 0:
+                raise ValueError()
+            flow["price"] = price
+            flow["step"] = "prize"
+        elif step == "prize":
+            if not value:
+                raise ValueError()
+            flow["prize"] = value
+            flow["step"] = "prize_value"
+        elif step == "prize_value":
+            if not value:
+                raise ValueError()
+            flow["prize_value"] = value
+            flow["step"] = "group"
+        elif step == "group":
+            group = DEFAULT_GROUP_ID if value.lower() in {"usar configurado", "usar", "default"} else int(value)
+            if group == 0:
+                await msg.reply_text("El ID configurado es 0. Envía el ID numérico del grupo.")
+                return True
+            flow["group"] = group
+            with db() as con:
+                cur = con.execute(
+                    """INSERT INTO raffles(name,group_id,total_numbers,price,prize,prize_value,status,created_at)
+                       VALUES(?,?,?,?,?,?,'active',?)""",
+                    (flow["name"], group, flow["total"], flow["price"], flow["prize"], flow["prize_value"], iso_now())
+                )
+                rid = cur.lastrowid
+                con.executemany(
+                    "INSERT INTO numbers(raffle_id,number,status,updated_at) VALUES(?,?,?,?)",
+                    [(rid, n, "available", iso_now()) for n in range(1, flow["total"] + 1)]
+                )
+            audit("new_raffle", f"Rifa #{rid}: {flow['name']}", update.effective_user.id)
+            context.user_data.pop("admin_flow", None)
+            await msg.reply_text(
+                f"✅ *Lista creada correctamente*\n\nID: *#{rid}*\nNombre: *{flow['name']}*\n"
+                f"Números: *{flow['total']}*\nValor por número: *{flow['price']:.2f} {CURRENCY}*\n"
+                f"Premio: *{flow['prize']}*\nValor del premio: *{flow['prize_value']}*\nGrupo: `{group}`",
+                parse_mode="Markdown", reply_markup=admin_back_keyboard()
+            )
+            return True
+        elif step == "winner_raffle":
+            raffle_id = int(value)
+            raffle = get_raffle(raffle_id)
+            if not raffle:
+                await msg.reply_text("No existe esa lista. Envía un ID válido.")
+                return True
+            flow["raffle_id"] = raffle_id
+            flow["step"] = "winner_number"
+            await msg.reply_text(f"Lista seleccionada: {raffle['name']} (#{raffle_id}).\nAhora escribe el *número ganador*:", parse_mode="Markdown")
+            return True
+        elif step == "winner_number":
+            number = int(value)
+            raffle_id = flow["raffle_id"]
+            context.user_data.pop("admin_flow", None)
+            await publish_winner(update, context, raffle_id, number)
+            return True
+        else:
+            context.user_data.pop("admin_flow", None)
+            await msg.reply_text("Formulario cancelado. Abre /admin para comenzar de nuevo.")
+            return True
+    except (ValueError, InvalidOperation):
+        await msg.reply_text("Ese dato no es válido. Inténtalo de nuevo.")
+        return True
+    await msg.reply_text(admin_flow_prompt(flow["step"]), parse_mode="Markdown")
+    return True
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg or not msg.text or msg.text.startswith("/"):
+        return
+    if await process_admin_flow(update, context):
         return
     text = msg.text.strip()
     if text.lower() == "lista":
@@ -817,60 +914,116 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("admin:"):
+        if not is_admin(uid) or q.message.chat.type != "private":
+            await q.answer("Solo el administrador puede usar este panel en privado.", show_alert=True)
+            return
         await q.answer()
         action = data.split(":", 1)[1]
-        raffle = get_active_raffle()
-        if action == "stats":
-            rows = active_raffles(DEFAULT_GROUP_ID)
+        if action == "create":
+            context.user_data["admin_flow"] = {"kind": "create", "step": "name"}
+            await q.message.reply_text(admin_flow_prompt("name"), parse_mode="Markdown")
+        elif action == "active":
+            with db() as con:
+                rows = [dict(r) for r in con.execute("SELECT * FROM raffles WHERE status='active' ORDER BY id").fetchall()]
             if not rows:
-                text = "No hay listas activas en el grupo configurado."
+                text = "No hay listas activas registradas."
             else:
                 blocks = []
                 for item in rows:
-                    s = stats(item["id"])
+                    st = stats(item["id"])
                     blocks.append(
-                        f"📊 *{s['name']}* (#{item['id']})\n"
-                        f"Ocupados: {s['occupied']}/{s['total']} · Pendientes: {s['pending']}\n"
-                        f"Disponibles: {s['available']}\n"
-                        f"Recaudado: {s['revenue']:.2f} {CURRENCY} · Precio: {s['price']:.2f} {CURRENCY}"
+                        f"🎟️ *{item['name']}* (#{item['id']})\n"
+                        f"Números: {st['total']} · Precio: {st['price']:.2f} {CURRENCY}\n"
+                        f"Premio: {item['prize'] or 'Por anunciar'} · Valor: {item.get('prize_value') or 'Por definir'}\n"
+                        f"Ocupados: {st['occupied']} · Pendientes: {st['pending']} · Libres: {st['available']}\n"
+                        f"Recaudado: {st['revenue']:.2f} {CURRENCY} · Grupo: {item['group_id']}"
                     )
-                text = "\n\n".join(blocks)
-            await q.edit_message_text(text, parse_mode="Markdown", reply_markup=admin_keyboard())
-        elif action == "raffles":
+                text = "📋 *LISTAS ACTIVAS*\n\n" + "\n\n".join(blocks)
+            await q.message.reply_text(text, parse_mode="Markdown", reply_markup=admin_back_keyboard())
+        elif action == "stats":
             with db() as con:
-                rows = con.execute("SELECT id,name,status,total_numbers FROM raffles ORDER BY id DESC LIMIT 20").fetchall()
-            text = "🎟️ *Rifas registradas*\n" + "\n".join(
-                f"#{r['id']} · {r['name']} · {r['status']} · {r['total_numbers']} números" for r in rows
-            ) + "\n\nCrear: /nueva Lista 2|100|5|ID_GRUPO|Premio|Valor del premio"
-            await q.edit_message_text(text, parse_mode="Markdown", reply_markup=admin_keyboard())
-        elif action == "helpwinner":
-            await q.edit_message_text("Para declarar el ganador usa:\n/ganador ID_RIFA NUMERO\n\nEjemplo: /ganador 1 14", reply_markup=admin_keyboard())
-        elif action == "reset":
-            rows = active_raffles(DEFAULT_GROUP_ID)
+                rows = [dict(r) for r in con.execute("SELECT * FROM raffles WHERE status='active' ORDER BY id").fetchall()]
             if not rows:
-                await q.edit_message_text("No hay listas activas para resetear.", reply_markup=admin_keyboard())
-                return
-            keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton(f"🔄 {r['name']} (#{r['id']})", callback_data=f"resetchoose:{r['id']}")]
-                 for r in rows] +
-                [[InlineKeyboardButton("Cancelar", callback_data="admin:back")]]
-            )
-            await q.edit_message_text("Selecciona qué lista deseas resetear:", reply_markup=keyboard)
+                await q.message.reply_text("No hay listas activas.", reply_markup=admin_back_keyboard())
+            else:
+                keyboard = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(f"📊 {r['name']} (#{r['id']})", callback_data=f"adminstats:{r['id']}")] for r in rows]
+                    + [[InlineKeyboardButton("⬅️ Volver al panel", callback_data="admin:back")]]
+                )
+                await q.message.reply_text("Selecciona la lista que quieres revisar:", reply_markup=keyboard)
+        elif action == "winner":
+            with db() as con:
+                rows = [dict(r) for r in con.execute("SELECT * FROM raffles WHERE status='active' ORDER BY id").fetchall()]
+            if not rows:
+                await q.message.reply_text("No hay listas activas para declarar ganador.", reply_markup=admin_back_keyboard())
+            else:
+                keyboard = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(f"🏆 {r['name']} (#{r['id']})", callback_data=f"winnerchoose:{r['id']}")] for r in rows]
+                    + [[InlineKeyboardButton("Cancelar", callback_data="admin:back")]]
+                )
+                await q.message.reply_text("¿En cuál lista vas a indicar el ganador?", reply_markup=keyboard)
+        elif action == "reset":
+            with db() as con:
+                rows = con.execute("SELECT id,name,status FROM raffles ORDER BY id DESC LIMIT 50").fetchall()
+            if not rows:
+                await q.message.reply_text("No hay listas registradas.", reply_markup=admin_back_keyboard())
+            else:
+                keyboard = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(f"🔄 {r['name']} (#{r['id']}) · {r['status']}", callback_data=f"resetchoose:{r['id']}")] for r in rows]
+                    + [[InlineKeyboardButton("Cancelar", callback_data="admin:back")]]
+                )
+                await q.message.reply_text("Selecciona por ID la lista que deseas reiniciar. Esto libera sus números y conserva el historial.", reply_markup=keyboard)
         elif action == "backup":
             await send_backup(update, context)
         elif action == "restore":
-            await q.edit_message_text(
-                "Envía el archivo JSON de respaldo en este chat privado. "
-                "El sistema validará el archivo y pedirá confirmación."
-            )
             context.user_data["awaiting_restore"] = True
+            await q.message.reply_text("Envía aquí el archivo de respaldo *.json*. El sistema lo validará y te pedirá confirmación.", parse_mode="Markdown", reply_markup=admin_back_keyboard())
         elif action == "history":
             await send_history(update, context)
         elif action == "back":
-            await q.edit_message_text("⚙️ PANEL DE ADMINISTRACIÓN", reply_markup=admin_keyboard())
+            context.user_data.pop("admin_flow", None)
+            await q.message.reply_text("⚙️ *PANEL DE ADMINISTRACIÓN*\nSelecciona una operación:", parse_mode="Markdown", reply_markup=admin_keyboard())
+        return
+
+    if data.startswith("adminstats:"):
+        if not is_admin(uid):
+            await q.answer("No autorizado.", show_alert=True)
+            return
+        raffle_id = int(data.split(":", 1)[1])
+        st = stats(raffle_id)
+        raffle = get_raffle(raffle_id)
+        if not st or not raffle:
+            await q.answer("Lista no encontrada.", show_alert=True)
+            return
+        await q.answer()
+        await q.message.reply_text(
+            f"📊 *{st['name']} (#{raffle_id})*\nEstado: {st['status']}\n"
+            f"Total de números: {st['total']}\nOcupados: {st['occupied']}\nPendientes: {st['pending']}\n"
+            f"Libres: {st['available']}\nPrecio por número: {st['price']:.2f} {CURRENCY}\n"
+            f"Recaudado (pagos aprobados): {st['revenue']:.2f} {CURRENCY}\n"
+            f"Premio: {raffle['prize'] or 'Por anunciar'}\nValor del premio: {raffle.get('prize_value') or 'Por definir'}",
+            parse_mode="Markdown", reply_markup=admin_back_keyboard()
+        )
+        return
+
+    if data.startswith("winnerchoose:"):
+        if not is_admin(uid):
+            await q.answer("No autorizado.", show_alert=True)
+            return
+        raffle_id = int(data.split(":", 1)[1])
+        raffle = get_raffle(raffle_id)
+        if not raffle or raffle["status"] != "active":
+            await q.answer("La lista no está activa.", show_alert=True)
+            return
+        await q.answer()
+        context.user_data["admin_flow"] = {"kind": "winner", "step": "winner_number", "raffle_id": raffle_id}
+        await q.message.reply_text(f"Lista: *{raffle['name']}* (#{raffle_id}).\nEscribe el número ganador:", parse_mode="Markdown")
         return
 
     if data.startswith("resetchoose:"):
+        if not is_admin(uid):
+            await q.answer("No autorizado.", show_alert=True)
+            return
         await q.answer()
         raffle_id = int(data.split(":", 1)[1])
         raffle_to_reset = get_raffle(raffle_id)
@@ -889,6 +1042,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("resetconfirm:"):
+        if not is_admin(uid):
+            await q.answer("No autorizado.", show_alert=True)
+            return
         await q.answer()
         raffle_id = int(data.split(":")[1])
         with db() as con:
@@ -1001,7 +1157,7 @@ async def send_history(update, context):
 
 
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id) or not context.user_data.get("awaiting_restore"):
+    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.user_data.get("awaiting_restore"):
         return
     doc = update.effective_message.document
     if not doc or not doc.file_name.lower().endswith(".json"):
@@ -1032,7 +1188,7 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def restore_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    if not is_admin(q.from_user.id):
+    if not is_admin(q.from_user.id) or q.message.chat.type != "private":
         await q.answer("No autorizado.", show_alert=True)
         return
     if q.data == "restore:cancel":
