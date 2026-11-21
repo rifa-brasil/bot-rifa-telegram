@@ -331,6 +331,24 @@ ADMIN_MENU_ACTIONS = {
     "🔄 Actualizar panel": "back",
 }
 
+def user_keyboard():
+    """Menú privado de participantes: solo consulta y juego."""
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("🎟️ Ver listas activas")],
+         [KeyboardButton("📊 Estadísticas")]],
+        resize_keyboard=True, is_persistent=True,
+        input_field_placeholder="Elige una opción"
+    )
+
+
+def user_stats_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎟️ Mis jugadas", callback_data="userstats:plays")],
+        [InlineKeyboardButton("🏆 Mis premios", callback_data="userstats:prizes")],
+        [InlineKeyboardButton("⬅️ Volver", callback_data="userstats:back")]
+    ])
+
+
 def admin_keyboard():
     """Teclado persistente del administrador; permanece visible en el chat privado."""
     return ReplyKeyboardMarkup(
@@ -380,9 +398,12 @@ def raffle_selector_keyboard(raffles):
 
 
 async def lists_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raffles = active_raffles(update.effective_chat.id)
+    if update.effective_chat.type != "private":
+        await update.effective_message.reply_text("Para ver y jugar las listas, abre el chat privado del bot y pulsa /start.")
+        return
+    raffles = active_raffles(DEFAULT_GROUP_ID)
     if not raffles:
-        await update.effective_message.reply_text("No hay listas activas en este grupo.")
+        await update.effective_message.reply_text("No hay listas activas en este momento.", reply_markup=user_keyboard())
         return
     summaries = []
     for raffle in raffles:
@@ -402,25 +423,19 @@ async def lists_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type == "private" and is_admin(update.effective_user.id):
+    if update.effective_chat.type != "private":
+        await update.effective_message.reply_text("Para jugar y consultar tus jugadas, abre el chat privado del bot y pulsa /start.")
+        return
+    if is_admin(update.effective_user.id):
         await update.effective_message.reply_text(
             "⚙️ PANEL DE ADMINISTRACIÓN\nSelecciona una opción. Los botones permanecerán visibles aquí:",
             reply_markup=admin_keyboard()
         )
         return
-    raffles = active_raffles(update.effective_chat.id)
-    if not raffles:
-        await update.effective_message.reply_text("No hay listas activas en este grupo.")
-    elif len(raffles) == 1:
-        context.user_data["selected_raffle_id"] = raffles[0]["id"]
-        await update.effective_message.reply_text(
-            "¡Bienvenido/a!\n\n" + list_text(raffles[0]["id"]), parse_mode="Markdown"
-        )
-    else:
-        await update.effective_message.reply_text(
-            "¡Bienvenido/a! Hay varias rifas activas. Selecciona una lista:",
-            reply_markup=raffle_selector_keyboard(raffles)
-        )
+    await update.effective_message.reply_text(
+        "¡Bienvenido/a! Aquí podrás jugar de forma privada y consultar únicamente tus jugadas y premios.",
+        reply_markup=user_keyboard()
+    )
 
 
 async def diagnostic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -547,18 +562,15 @@ async def publish_winner(update, context, raffle_id, number):
     )
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏆 Premio Recibido", callback_data=f"prize:{winner_id}")]])
     try:
-        sent = await context.bot.send_message(chat_id=raffle["group_id"], text=msg, parse_mode="Markdown", reply_markup=keyboard)
+        sent = await context.bot.send_message(chat_id=row["user_id"], text=msg, parse_mode="Markdown", reply_markup=keyboard)
         with db() as con:
             con.execute("UPDATE winners SET group_message_id=? WHERE id=?", (sent.message_id, winner_id))
     except Exception:
-        log.exception("No se pudo publicar el ganador en el grupo")
-        await update.effective_message.reply_text("El ganador quedó registrado, pero no pude publicar en el grupo. Comprueba el ID del grupo y los permisos del bot.")
+        log.exception("No se pudo enviar el resultado al ganador en privado")
+        await update.effective_message.reply_text("El ganador quedó registrado, pero no pude enviarle el mensaje privado. El usuario debe iniciar el bot con /start.")
         return
-    private_sent = await send_private(row["user_id"],
-        f"¡Felicidades, {row['name']}! Has ganado {raffle['name']} con el número {number:02d}. Contacta con el administrador para coordinar la entrega del premio.")
     audit("winner", f"Rifa #{raffle_id}, número {number}, usuario {row['user_id']}", update.effective_user.id)
-    suffix = "El aviso privado se envió desde la cuenta personal conectada." if private_sent else "No se pudo enviar el privado: revisa la sesión Telethon y que el ganador haya iniciado conversación con esa cuenta."
-    await update.effective_message.reply_text(f"✅ Ganador publicado en el grupo. {suffix}")
+    await update.effective_message.reply_text("✅ Resultado enviado al chat privado del ganador.")
 
 
 async def winner_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -761,6 +773,20 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = msg.text.strip()
 
+    # Las participaciones se gestionan exclusivamente en el chat privado del bot.
+    if update.effective_chat.type != "private":
+        if not is_admin(update.effective_user.id):
+            await msg.reply_text("🔒 Para jugar, abre el chat privado del bot y pulsa /start. Las jugadas no se realizan en el grupo.")
+        return
+
+    if not is_admin(update.effective_user.id):
+        if text in {"🎟️ Ver listas activas", "listas", "lista", "hola", "buenas", "rifa", "inicio"}:
+            await lists_cmd(update, context)
+            return
+        if text == "📊 Estadísticas":
+            await msg.reply_text("📊 *TUS ESTADÍSTICAS*\nElige qué quieres consultar:", parse_mode="Markdown", reply_markup=user_stats_keyboard())
+            return
+
     # Panel fijo: solo responde en el chat privado y al administrador autorizado.
     if update.effective_chat.type == "private" and is_admin(update.effective_user.id):
         action = ADMIN_MENU_ACTIONS.get(text)
@@ -773,7 +799,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.lower() == "lista":
         selected_id = context.user_data.get("selected_raffle_id")
         selected = get_raffle(selected_id) if selected_id else None
-        if selected and selected["group_id"] == update.effective_chat.id and selected["status"] == "active":
+        if selected and selected["group_id"] == DEFAULT_GROUP_ID and selected["status"] == "active":
             await msg.reply_text(list_text(selected_id), parse_mode="Markdown")
         else:
             await lists_cmd(update, context)
@@ -784,7 +810,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not re.fullmatch(r"\d+(?:\s*,\s*\d+)*", text):
         return
 
-    group_id = update.effective_chat.id
+    group_id = DEFAULT_GROUP_ID
     selected_id = context.user_data.get("selected_raffle_id")
     raffle = get_raffle(selected_id) if selected_id else None
     if raffle and (raffle["group_id"] != group_id or raffle["status"] != "active"):
@@ -839,7 +865,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                    origin_chat,status,created_at,expires_at,price_per_number,total_amount)
                    VALUES(?,?,?,?,?,?,?,'awaiting_button',?,?,?,?)""",
                 (req_id, raffle["id"], uid, name, uname, json.dumps(numbers),
-                 group_id, created.isoformat(), first_deadline.isoformat(),
+                 update.effective_chat.id, created.isoformat(), first_deadline.isoformat(),
                  float(raffle["price"]), len(numbers) * float(raffle["price"]))
             )
 
@@ -859,16 +885,17 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     try:
         sent = await context.bot.send_message(
-            chat_id=group_id, text=request_text, parse_mode="Markdown"
+            chat_id=update.effective_chat.id, text=request_text, parse_mode="Markdown"
         )
         with db() as con:
             con.execute("UPDATE requests SET group_message_id=? WHERE id=?", (sent.message_id, req_id))
         await msg.reply_text(
-            f"✅ Tu solicitud de la {raffle['name']} está publicada en el grupo. "
-            "Realiza el pago y espera a que aparezca el botón para notificarlo."
+            f"✅ Tu solicitud de la {raffle['name']} está aquí, en tu chat privado. "
+            "Realiza el pago y espera a que aparezca el botón para notificarlo.",
+            reply_markup=user_keyboard()
         )
     except Exception:
-        log.exception("No se pudo publicar la solicitud en el grupo")
+        log.exception("No se pudo enviar la solicitud al chat privado")
         # Si no se pudo publicar, liberar la reserva para no bloquear números sin aviso.
         with db() as con:
             for n in numbers:
@@ -889,12 +916,49 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("selectraffle:"):
         raffle_id = int(data.split(":", 1)[1])
         raffle = get_raffle(raffle_id)
-        if not raffle or raffle["group_id"] != q.message.chat_id or raffle["status"] != "active":
+        if not raffle or q.message.chat.type != "private" or raffle["status"] != "active":
             await q.answer("Esta lista ya no está disponible.", show_alert=True)
             return
         context.user_data["selected_raffle_id"] = raffle_id
         await q.answer("Lista seleccionada")
-        await q.message.reply_text(list_text(raffle_id), parse_mode="Markdown")
+        await q.message.reply_text(list_text(raffle_id), parse_mode="Markdown", reply_markup=user_keyboard())
+        return
+
+    if data.startswith("userstats:"):
+        if q.message.chat.type != "private" or is_admin(uid):
+            await q.answer("Esta opción es para participantes en privado.", show_alert=True)
+            return
+        action = data.split(":", 1)[1]
+        if action == "back":
+            await q.answer()
+            await q.message.reply_text("Menú principal", reply_markup=user_keyboard())
+            return
+        with db() as con:
+            if action == "plays":
+                rows = con.execute(
+                    "SELECT p.*,r.name AS raffle_name FROM purchases p JOIN raffles r ON r.id=p.raffle_id WHERE p.user_id=? ORDER BY p.id DESC LIMIT 30",
+                    (uid,)
+                ).fetchall()
+                pending = con.execute(
+                    "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','awaiting_user_click','payment_reported','claim_pending') ORDER BY rq.created_at DESC LIMIT 20",
+                    (uid,)
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    "SELECT w.*,r.name AS raffle_name,r.prize,r.prize_value FROM winners w JOIN raffles r ON r.id=w.raffle_id WHERE w.user_id=? ORDER BY w.id DESC LIMIT 30",
+                    (uid,)
+                ).fetchall()
+        if action == "plays":
+            blocks = [f"🎟️ {r['raffle_name']} · Números: {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))} · {float(r['amount']):.2f} {CURRENCY} · {r['status']}" for r in rows]
+            blocks += [f"⏳ {r['raffle_name']} · Números: {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))} · {float(r['total_amount'] or 0):.2f} {CURRENCY} · pendiente" for r in pending]
+            body = "\n\n".join(blocks) if blocks else "Todavía no tienes jugadas registradas."
+            title = "🎟️ *MIS JUGADAS*"
+        else:
+            blocks = [f"🏆 {r['raffle_name']} · Número: {int(r['number']):02d} · Premio: {r['prize'] or 'Por anunciar'} · {'Recibido' if r['prize_received'] else 'Pendiente de confirmar'}" for r in rows]
+            body = "\n\n".join(blocks) if blocks else "Todavía no tienes premios registrados."
+            title = "🏆 *MIS PREMIOS*"
+        await q.answer()
+        await q.message.reply_text(title + "\n\n" + body, parse_mode="Markdown", reply_markup=user_stats_keyboard())
         return
 
     if data.startswith("userpaid:"):
@@ -990,7 +1054,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_reply_markup(reply_markup=None)
         await context.bot.send_message(
             req["origin_chat"],
-            f"📨 {user_link} envió una reclamación de pago. El administrador revisará tu caso.",
+            "📨 Tu reclamación de pago fue enviada al administrador. Revisará tu caso.",
             parse_mode="Markdown"
         )
         audit("payment_claimed", f"Solicitud {req_id}; usuario {uid}")
@@ -1014,13 +1078,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer("Confirmación registrada. ¡Gracias!")
         await q.edit_message_reply_markup(reply_markup=None)
         raffle = get_raffle(winner["raffle_id"])
-        await context.bot.send_message(
-            chat_id=raffle["group_id"],
-            text=f"🏆 ¡PREMIO RECIBIDO CONFIRMADO!\n\n"
-                 f"[{winner['name']}](tg://user?id={winner['user_id']}) ha confirmado que recibió su premio "
-                  f"en la rifa «{raffle['name']}».",
-            parse_mode="Markdown"
-        )
+        await context.bot.send_message(winner["user_id"], "✅ Gracias por confirmar que recibiste tu premio.")
         audit("prize_received", f"Ganador #{winner_id}, usuario {uid}")
         return
 
@@ -1067,25 +1125,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(f"✅ Solicitud {req_id} aprobada: {numbers_text}")
             await context.bot.send_message(
                 req["origin_chat"],
-                f"🎉 Pago confirmado para [{req['name']}](tg://user?id={req['user_id']}). Números asignados: {numbers_text}.",
+                f"✅ ¡PAGO APROBADO! Tu pago fue verificado. Números asignados: {numbers_text}. Tu jugada en «{raffle['name']}» está confirmada.",
                 parse_mode="Markdown"
-            )
-            await send_private(
-                req["user_id"],
-                f"✅ ¡PAGO APROBADO!\nHola {req['name']}, tu pago ha sido verificado. "
-                f"Tus números ({numbers_text}) ya están registrados en «{raffle['name']}»."
             )
         else:
             await q.edit_message_text(f"❌ Solicitud {req_id} rechazada.")
             await context.bot.send_message(
                 req["origin_chat"],
-                f"⚠️ La solicitud de [{req['name']}](tg://user?id={req['user_id']}) fue rechazada. Números liberados: {numbers_text}.",
+                f"❌ Tu solicitud para «{raffle['name']}» fue rechazada. Los números {numbers_text} vuelven a estar disponibles.",
                 parse_mode="Markdown"
-            )
-            await send_private(
-                req["user_id"],
-                f"❌ Tu solicitud para {raffle['name']} fue rechazada. "
-                f"Los números {numbers_text} vuelven a estar disponibles."
             )
         audit("payment_" + status, f"Solicitud {req_id}; números {numbers_text}", uid)
         return
@@ -1484,7 +1532,7 @@ async def expire_reservations(app):
                     ]])
                     name_link = f"[{req['name']}](tg://user?id={req['user_id']})"
                     expiry_text = (
-                        f"⌛ La reserva de {name_link} venció porque no avisó el pago dentro del plazo. "
+                        f"⌛ Tu reserva venció porque no avisaste el pago dentro del plazo. "
                         f"Se liberaron los números {', '.join(f'{n:02d}' for n in nums)}. "
                         "La jugada no fue completada. Si realizaste el pago, pulsa «Reclamar Pago» "
                         "para que el administrador revise tu caso."
@@ -1548,7 +1596,7 @@ async def pick3_monitor(app):
                 # 000-999 a la lista 1-N porque esa regla debe configurarse explícitamente.
                 for r in db_raffles_for_draw():
                     await app.bot.send_message(
-                        r["group_id"],
+                        ADMIN_ID,
                         f"🎲 RESULTADO OFICIAL FLORIDA PICK 3\n"
                         f"Fecha: {date} · Sorteo: {'Mediodía' if draw == 'M' else 'Noche'}\n"
                         f"Número: {result} · Fireball: {fireball}\n\n"
@@ -1610,16 +1658,13 @@ async def pick3_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """No anuncia jugadas en grupos; invita a los nuevos a usar el bot en privado."""
     if not update.effective_message or not update.effective_message.new_chat_members:
         return
     for member in update.effective_message.new_chat_members:
         if member.id != context.bot.id:
-            name = member.first_name or "Participante"
             await update.effective_message.reply_text(
-                f"👋 ¡Bienvenido/a {name}!\\n"
-                "Para consultar los números escribe `lista`. Para solicitar números, "
-                "envíalos separados por comas (por ejemplo: 7, 14).",
-                parse_mode="Markdown"
+                "👋 ¡Bienvenido/a! Para participar y consultar tus jugadas, abre el chat privado del bot y pulsa /start."
             )
 
 
