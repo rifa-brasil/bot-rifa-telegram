@@ -389,6 +389,41 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def diagnostic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Diagnóstico visible solo para el administrador del bot."""
+    user = update.effective_user
+    message = update.effective_message
+    chat = update.effective_chat
+    if not user or not is_admin(user.id):
+        await message.reply_text("⛔ No autorizado.")
+        return
+    try:
+        me = await context.bot.get_me()
+        with db() as con:
+            count = con.execute(
+                "SELECT COUNT(*) FROM raffles WHERE group_id=? AND status='active'",
+                (chat.id,)
+            ).fetchone()[0]
+        webhook = await context.bot.get_webhook_info()
+        await message.reply_text(
+            "🔎 DIAGNÓSTICO DEL BOT\n"
+            f"Bot: @{me.username or 'sin_usuario'} (ID {me.id})\n"
+            f"Chat actual: {chat.id} ({chat.type})\n"
+            f"GROUP_CHAT_ID configurado: {DEFAULT_GROUP_ID}\n"
+            f"Listas activas en este chat: {count}\n"
+            f"Webhook configurado: {'sí' if webhook.url else 'no'}\n"
+            "Si el chat actual y GROUP_CHAT_ID no coinciden, corrige GROUP_CHAT_ID en Render."
+        )
+    except Exception:
+        log.exception("Falló /diagnostico")
+        await message.reply_text("No se pudo completar el diagnóstico. Revisa los logs del servicio.")
+
+
+async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Registra errores de handlers para que no queden fallos silenciosos."""
+    log.error("Excepción procesando actualización de Telegram", exc_info=context.error)
+
+
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.effective_message.reply_text("⛔ No autorizado.")
@@ -1251,7 +1286,9 @@ async def main():
     )
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("listas", lists_cmd))
+    app.add_handler(CommandHandler("diagnostico", diagnostic_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
+    app.add_error_handler(telegram_error_handler)
     app.add_handler(CommandHandler("nueva", new_raffle_cmd))
     app.add_handler(CommandHandler("ganador", winner_cmd))
     app.add_handler(CommandHandler("pick3", pick3_cmd))
@@ -1260,17 +1297,35 @@ async def main():
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.Document.ALL, document_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    log.info("Bot de rifas iniciado.")
-    await app.initialize()
-    await app.start()
-    # post_init no se ejecuta al usar initialize/start manualmente.
-    await post_init(app)
-    await app.updater.start_polling()
     try:
+        await app.initialize()
+        me = await app.bot.get_me()
+        log.info("Conectado a Telegram como @%s (ID %s)", me.username, me.id)
+        # Elimina un webhook anterior: getUpdates (polling) no funciona mientras haya uno activo.
+        webhook = await app.bot.get_webhook_info()
+        if webhook.url:
+            log.warning("Había un webhook configurado (%s); se eliminará para activar polling.", webhook.url)
+            await app.bot.delete_webhook(drop_pending_updates=False)
+        await app.start()
+        # post_init no se ejecuta al usar initialize/start manualmente.
+        await post_init(app)
+        if app.updater is None:
+            raise RuntimeError("Application no tiene Updater; no se puede iniciar polling.")
+        await app.updater.start_polling(
+            drop_pending_updates=False,
+            bootstrap_retries=5,
+            allowed_updates=Update.ALL_TYPES,
+        )
+        log.info("POLLING ACTIVO: el bot ya está escuchando mensajes y comandos.")
         await asyncio.Event().wait()
+    except Exception:
+        log.exception("Error fatal al iniciar o mantener el bot de Telegram")
+        raise
     finally:
-        await app.updater.stop()
-        await app.stop()
+        if app.updater and app.updater.running:
+            await app.updater.stop()
+        if app.running:
+            await app.stop()
         await app.shutdown()
         if user_client:
             await user_client.disconnect()
