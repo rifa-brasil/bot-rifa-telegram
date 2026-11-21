@@ -323,7 +323,7 @@ ADMIN_MENU_ACTIONS = {
     "➕ Crear lista": "create",
     "📋 Listas activas": "active",
     "📊 Estadísticas": "stats",
-    "🏆 Indicar ganador": "winner",
+    "🏆 Indicar Número Ganador": "winner",
     "🔄 Resetear lista": "reset",
     "💾 Crear respaldo": "backup",
     "♻️ Restaurar respaldo": "restore",
@@ -336,7 +336,7 @@ def admin_keyboard():
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton("➕ Crear lista"), KeyboardButton("📋 Listas activas")],
-            [KeyboardButton("📊 Estadísticas"), KeyboardButton("🏆 Indicar ganador")],
+            [KeyboardButton("📊 Estadísticas"), KeyboardButton("🏆 Indicar Número Ganador")],
             [KeyboardButton("🔄 Resetear lista"), KeyboardButton("👥 Historial")],
             [KeyboardButton("💾 Crear respaldo"), KeyboardButton("♻️ Restaurar respaldo")],
             [KeyboardButton("🔄 Actualizar panel")],
@@ -839,7 +839,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     request_text = (
         f"⏳ *SOLICITUD EN PROCESO*\n\n"
         f"🎟️ Lista: *{raffle['name']}*\n"
-        f"👤 Participante: {name}\n"
+        f"👤 Participante: [{name}](tg://user?id={uid})\n"
         f"🔢 Números: *{number_text}*\n"
         f"💵 Precio por número: *{float(raffle['price']):.2f} {CURRENCY}*\n"
         f"💰 Total a pagar: *{amount:.2f} {CURRENCY}*\n"
@@ -930,14 +930,61 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             log.exception("No se pudo avisar al administrador del pago declarado")
             await context.bot.send_message(req["origin_chat"],
-                f"⚠️ {req['name']} indicó que pagó, pero no se pudo notificar al administrador. "
-                "Contacta directamente con él.")
+                f"⚠️ [{req['name']}](tg://user?id={req['user_id']}) indicó que pagó, pero no se pudo notificar al administrador. "
+                "Contacta directamente con él.", parse_mode="Markdown")
         await context.bot.send_message(
             req["origin_chat"],
-            f"📨 {req['name']} ha indicado que realizó el pago de la {raffle['name']}. "
-            "El pago está pendiente de verificación del administrador."
+            f"📨 [{req['name']}](tg://user?id={req['user_id']}) ha indicado que realizó el pago de la {raffle['name']}. "
+            "El pago está pendiente de verificación del administrador.",
+            parse_mode="Markdown"
         )
         audit("payment_reported_by_user", f"Solicitud {req_id}; usuario {uid}")
+        return
+
+    if data.startswith("claimpay:"):
+        req_id = data.split(":", 1)[1]
+        async with db_lock:
+            with db() as con:
+                con.execute("BEGIN IMMEDIATE")
+                req = con.execute("SELECT * FROM requests WHERE id=?", (req_id,)).fetchone()
+                if not req:
+                    await q.answer("Solicitud no encontrada.", show_alert=True)
+                    return
+                if uid != req["user_id"]:
+                    await q.answer("Solo quien hizo la solicitud puede reclamar el pago.", show_alert=True)
+                    return
+                if req["status"] != "expired":
+                    await q.answer("Este reclamo ya fue enviado o la solicitud no venció.", show_alert=True)
+                    return
+                con.execute(
+                    "UPDATE requests SET status='claim_pending',reported_at=? WHERE id=? AND status='expired'",
+                    (iso_now(), req_id)
+                )
+        raffle = get_raffle(req["raffle_id"])
+        nums = ", ".join(f"{n:02d}" for n in json.loads(req["numbers_json"]))
+        user_link = f"[{req['name']}](tg://user?id={req['user_id']})"
+        admin_claim = (
+            "🚨 *RECLAMACIÓN DE PAGO*\n\n"
+            f"Solicitud: `{req_id}`\nRifa: *{raffle['name'] if raffle else req['raffle_id']}*\n"
+            f"Participante: {user_link}\nID Telegram: `{req['user_id']}`\n"
+            f"Números: *{nums}*\nImporte reclamado: *{float(req['total_amount'] or 0):.2f} {CURRENCY}*\n\n"
+            "La reserva venció y los números ya fueron liberados. Evalúa el comprobante y, "
+            "si corresponde, gestiona la devolución del pago."
+        )
+        try:
+            await context.bot.send_message(ADMIN_ID, admin_claim, parse_mode="Markdown")
+        except Exception:
+            log.exception("No se pudo enviar el reclamo de pago al administrador")
+            await q.answer("No se pudo notificar al administrador. Inténtalo de nuevo.", show_alert=True)
+            return
+        await q.answer("Reclamo enviado al administrador.")
+        await q.edit_message_reply_markup(reply_markup=None)
+        await context.bot.send_message(
+            req["origin_chat"],
+            f"📨 {user_link} envió una reclamación de pago. El administrador revisará tu caso.",
+            parse_mode="Markdown"
+        )
+        audit("payment_claimed", f"Solicitud {req_id}; usuario {uid}")
         return
 
     if data.startswith("prize:"):
@@ -961,7 +1008,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=raffle["group_id"],
             text=f"🏆 ¡PREMIO RECIBIDO CONFIRMADO!\n\n"
-                 f"{winner['name']} ha confirmado que recibió su premio en la rifa «{raffle['name']}»."
+                 f"[{winner['name']}](tg://user?id={winner['user_id']}) ha confirmado que recibió su premio "
+                  f"en la rifa «{raffle['name']}».",
+            parse_mode="Markdown"
         )
         audit("prize_received", f"Ganador #{winner_id}, usuario {uid}")
         return
@@ -1009,7 +1058,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(f"✅ Solicitud {req_id} aprobada: {numbers_text}")
             await context.bot.send_message(
                 req["origin_chat"],
-                f"🎉 Pago confirmado para {req['name']}. Números asignados: {numbers_text}."
+                f"🎉 Pago confirmado para [{req['name']}](tg://user?id={req['user_id']}). Números asignados: {numbers_text}.",
+                parse_mode="Markdown"
             )
             await send_private(
                 req["user_id"],
@@ -1020,7 +1070,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(f"❌ Solicitud {req_id} rechazada.")
             await context.bot.send_message(
                 req["origin_chat"],
-                f"⚠️ La solicitud de {req['name']} fue rechazada. Números liberados: {numbers_text}."
+                f"⚠️ La solicitud de [{req['name']}](tg://user?id={req['user_id']}) fue rechazada. Números liberados: {numbers_text}.",
+                parse_mode="Markdown"
             )
             await send_private(
                 req["user_id"],
@@ -1373,13 +1424,15 @@ async def expire_reservations(app):
                             chat_id=req["origin_chat"], message_id=req["group_message_id"],
                             text=(
                                 f"⏳ *SOLICITUD EN PROCESO*\n\nLista: *{raffle['name']}*\n"
-                                f"Participante: {req['name']}\nNúmeros: *{nums}*\n"
+                                f"Participante: [{req['name']}](tg://user?id={req['user_id']})\nNúmeros: *{nums}*\n"
                                 f"Precio por número: *{float(req['price_per_number'] or 0):.2f} {CURRENCY}*\n"
                                 f"Total a pagar: *{float(req['total_amount'] or 0):.2f} {CURRENCY}*\n"
                                 f"Premio: *{raffle['prize'] or 'Por anunciar'}*\n"
                                 f"Valor del premio: *{raffle['prize_value'] or 'Por definir'}*\n\n"
-                                "Si ya realizaste el pago, pulsa el botón. Tienes 5 minutos para avisar. "
-                                "Si no lo haces, la reserva se cancelará y los números se liberarán."
+                                "Los primeros 5 minutos son para realizar el pago. Ahora tienes otros 5 minutos "
+                                "para pulsar «YA REALICÉ EL PAGO» y avisar. Si no avisas, se liberarán "
+                                "los números y la jugada quedará como no completada. Si pagaste, podrás "
+                                "pulsar «Reclamar Pago» para solicitar una revisión."
                             ), parse_mode="Markdown", reply_markup=keyboard
                         )
                     with db() as con:
@@ -1417,14 +1470,25 @@ async def expire_reservations(app):
                             (iso_now(), req["id"])
                         )
                 try:
-                    await app.bot.send_message(
-                        req["origin_chat"],
-                        f"⌛ La reserva de {req['name']} venció porque no avisó el pago dentro del plazo. "
-                        f"Se liberaron los números {', '.join(f'{n:02d}' for n in nums)}."
+                    claim_keyboard = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("💸 Reclamar Pago", callback_data=f"claimpay:{req['id']}")
+                    ]])
+                    name_link = f"[{req['name']}](tg://user?id={req['user_id']})"
+                    expiry_text = (
+                        f"⌛ La reserva de {name_link} venció porque no avisó el pago dentro del plazo. "
+                        f"Se liberaron los números {', '.join(f'{n:02d}' for n in nums)}. "
+                        "La jugada no fue completada. Si realizaste el pago, pulsa «Reclamar Pago» "
+                        "para que el administrador revise tu caso."
                     )
                     if req["group_message_id"]:
-                        await app.bot.edit_message_reply_markup(
-                            chat_id=req["origin_chat"], message_id=req["group_message_id"], reply_markup=None
+                        await app.bot.edit_message_text(
+                            chat_id=req["origin_chat"], message_id=req["group_message_id"],
+                            text=expiry_text, parse_mode="Markdown", reply_markup=claim_keyboard
+                        )
+                    else:
+                        await app.bot.send_message(
+                            req["origin_chat"], expiry_text, parse_mode="Markdown",
+                            reply_markup=claim_keyboard
                         )
                 except Exception:
                     log.exception("No se pudo publicar expiración de solicitud %s", req["id"])
