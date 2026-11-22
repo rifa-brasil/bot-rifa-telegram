@@ -32,7 +32,7 @@ from telegram import (
 )
 from telegram.ext import (
     Application, ApplicationBuilder, CallbackQueryHandler, CommandHandler,
-    ContextTypes, MessageHandler, filters
+    ChatMemberHandler, ContextTypes, MessageHandler, filters
 )
 
 load_dotenv()
@@ -45,7 +45,8 @@ log = logging.getLogger("rifas")
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
 DEFAULT_GROUP_ID = int(os.getenv("GROUP_CHAT_ID", "0"))
-CHANNEL_CHAT_ID = int(os.getenv("CHANNEL_CHAT_ID", "0"))  # Canal público de transparencia
+CHANNEL_CHAT_ID = int(os.getenv("CHANNEL_CHAT_ID", "0"))  # ID numérico del canal
+CHANNEL_JOIN_URL = "https://t.me/+sRdEndX3bwszY2Ix"  # Enlace de acceso proporcionado
 DB_PATH = os.getenv("DB_PATH", "rifas.sqlite3")
 PORT = int(os.getenv("PORT", "10000"))
 RESERVATION_MINUTES = 5  # Primera ventana: 5 min para realizar el pago
@@ -201,6 +202,7 @@ def init_db():
             ("pay_button_at", "TEXT"),
             ("payment_deadline_at", "TEXT"),
             ("reported_at", "TEXT"),
+            ("claim_receipt_file_id", "TEXT DEFAULT ''"),
             ("price_per_number", "REAL DEFAULT 0"),
             ("total_amount", "REAL DEFAULT 0")
         ]:
@@ -351,6 +353,39 @@ ADMIN_MENU_ACTIONS = {
     "🔄 Actualizar panel": "back",
 }
 
+def channel_join_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Unirme al canal", url=CHANNEL_JOIN_URL)],
+        [InlineKeyboardButton("✅ Ya me uní · Verificar", callback_data="channel:check")]
+    ])
+
+
+async def has_channel_access(bot, user_id):
+    """Comprueba membresía usando CHANNEL_CHAT_ID; el enlace privado no sirve como ID."""
+    if not CHANNEL_CHAT_ID:
+        log.error("CHANNEL_CHAT_ID no configurado; no se puede verificar el acceso al canal")
+        return False
+    try:
+        member = await bot.get_chat_member(chat_id=CHANNEL_CHAT_ID, user_id=user_id)
+        return member.status in {"member", "administrator", "creator"}
+    except Exception:
+        log.exception("No se pudo verificar membresía del usuario %s", user_id)
+        return False
+
+
+async def require_channel(update, context):
+    user = update.effective_user
+    if user and await has_channel_access(context.bot, user.id):
+        return True
+    if update.effective_message:
+        await update.effective_message.reply_text(
+            "🔒 Para participar y consultar tus listas/estadísticas, primero debes unirte al canal. "
+            "Después pulsa «Ya me uní · Verificar».",
+            reply_markup=channel_join_keyboard()
+        )
+    return False
+
+
 def user_keyboard():
     """Menú privado de participantes: solo consulta y juego."""
     return ReplyKeyboardMarkup(
@@ -421,6 +456,8 @@ async def lists_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         await update.effective_message.reply_text("Para ver y jugar las listas, abre el chat privado del bot y pulsa /start.")
         return
+    if not is_admin(update.effective_user.id) and not await require_channel(update, context):
+        return
     raffles = active_raffles(DEFAULT_GROUP_ID)
     if not raffles:
         await update.effective_message.reply_text("No hay listas activas en este momento.", reply_markup=user_keyboard())
@@ -452,6 +489,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚙️ PANEL DE ADMINISTRACIÓN\nSelecciona una opción. Los botones permanecerán visibles aquí:",
             reply_markup=admin_keyboard()
         )
+        return
+    if not await require_channel(update, context):
         return
 
     with db() as con:
@@ -835,6 +874,30 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("🔒 Para jugar, abre el chat privado del bot y pulsa /start. Las jugadas no se realizan en el grupo.")
         return
 
+    # La respuesta del administrador a una solicitud de llave se envía directamente al usuario.
+    pending_key = context.user_data.get("awaiting_key_delivery")
+    if is_admin(update.effective_user.id) and pending_key:
+        key_text = text.strip()
+        if not key_text:
+            await msg.reply_text("Escribe la llave que deseas enviar.")
+            return
+        try:
+            await context.bot.send_message(
+                chat_id=pending_key["user_id"],
+                text=("🔑 LLAVE SOLICITADA\n\n" + key_text +
+                      "\n\nSi necesitas ayuda, responde a este mensaje en el chat privado del bot.")
+            )
+            context.user_data.pop("awaiting_key_delivery", None)
+            await msg.reply_text("✅ Llave enviada directamente al usuario.")
+            audit("manual_key_sent", f"Solicitud {pending_key['request_id']} al usuario {pending_key['user_id']}", update.effective_user.id)
+        except Exception:
+            log.exception("No se pudo entregar la llave al usuario")
+            await msg.reply_text("❌ No se pudo enviar la llave. Comprueba que el usuario haya iniciado el bot.")
+        return
+
+    if not is_admin(update.effective_user.id) and not await require_channel(update, context):
+        return
+
     if not is_admin(update.effective_user.id):
         if text in {"🎟️ Ver listas activas", "listas", "lista", "hola", "buenas", "rifa", "inicio"}:
             await lists_cmd(update, context)
@@ -956,8 +1019,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Después aparecerá un botón para avisar que ya pagaste."
     )
     try:
+        key_keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔑 Solicitar llave", callback_data=f"keyrequest:{req_id}")
+        ]])
         sent = await context.bot.send_message(
-            chat_id=update.effective_chat.id, text=request_text, parse_mode="Markdown"
+            chat_id=update.effective_chat.id, text=request_text, parse_mode="Markdown",
+            reply_markup=key_keyboard
         )
         with db() as con:
             con.execute("UPDATE requests SET group_message_id=? WHERE id=?", (sent.message_id, req_id))
@@ -985,9 +1052,62 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data or ""
     uid = q.from_user.id
 
+    if data == "channel:check":
+        if await has_channel_access(context.bot, uid):
+            await q.answer("¡Acceso confirmado!")
+            await q.message.reply_text("✅ Ya tienes acceso. Usa el menú para ver las listas.", reply_markup=user_keyboard())
+        else:
+            await q.answer("Aún no aparece tu membresía. Únete al canal y vuelve a verificar.", show_alert=True)
+        return
+
+    if data.startswith("keyrequest:"):
+        req_id = data.split(":", 1)[1]
+        with db() as con:
+            req = con.execute("SELECT * FROM requests WHERE id=?", (req_id,)).fetchone()
+        if not req or uid != req["user_id"]:
+            await q.answer("Esta solicitud no te pertenece.", show_alert=True)
+            return
+        if req["status"] not in {"awaiting_button", "awaiting_user_click", "payment_reported", "approved"}:
+            await q.answer("La solicitud ya no está activa.", show_alert=True)
+            return
+        raffle = get_raffle(req["raffle_id"])
+        nums = ", ".join(f"{n:02d}" for n in json.loads(req["numbers_json"]))
+        await q.answer("Solicitud de llave enviada al administrador.")
+        admin_text = (
+            "🔑 *SOLICITUD DE LLAVE*\n\n"
+            f"Solicitud: `{req_id}`\nLista: *{raffle['name'] if raffle else req['raffle_id']}*\n"
+            f"Participante: {req['name']} (@{req['username'] or 'sin username'})\n"
+            f"ID Telegram: `{req['user_id']}`\nNúmeros: *{nums}*\n"
+            "Pulsa «Responder con llave» y después escribe aquí la llave que deseas enviar."
+        )
+        key_admin_keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✉️ Responder con llave", callback_data=f"keyreply:{req['user_id']}:{req_id}")
+        ]])
+        try:
+            await context.bot.send_message(ADMIN_ID, admin_text, parse_mode="Markdown", reply_markup=key_admin_keyboard)
+            await q.message.reply_text("📨 Ya avisé al administrador. Te enviará la llave aquí, en este chat privado.")
+        except Exception:
+            log.exception("No se pudo notificar solicitud de llave")
+            await q.answer("No pude avisar al administrador. Inténtalo de nuevo.", show_alert=True)
+        return
+
+    if data.startswith("keyreply:"):
+        if not is_admin(uid) or q.message.chat.type != "private":
+            await q.answer("Solo el administrador puede responder a esta solicitud.", show_alert=True)
+            return
+        _, user_id, req_id = data.split(":", 2)
+        context.user_data["awaiting_key_delivery"] = {"user_id": int(user_id), "request_id": req_id}
+        await q.answer("Escribe la llave en este chat.")
+        await q.message.reply_text(f"✍️ Escribe ahora la llave para el usuario {user_id}. Se enviará directamente a su chat privado.")
+        return
+
     if data.startswith("selectraffle:"):
         raffle_id = int(data.split(":", 1)[1])
         raffle = get_raffle(raffle_id)
+        if not is_admin(uid) and not await has_channel_access(context.bot, uid):
+            await q.answer("Primero debes unirte al canal.", show_alert=True)
+            await q.message.reply_text("🔒 Únete al canal y verifica tu acceso:", reply_markup=channel_join_keyboard())
+            return
         if not raffle or q.message.chat.type != "private" or raffle["status"] != "active":
             await q.answer("Esta lista ya no está disponible.", show_alert=True)
             return
@@ -999,6 +1119,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("userstats:"):
         if q.message.chat.type != "private" or is_admin(uid):
             await q.answer("Esta opción es para participantes en privado.", show_alert=True)
+            return
+        if not await has_channel_access(context.bot, uid):
+            await q.answer("Primero debes unirte al canal.", show_alert=True)
+            await q.message.reply_text("🔒 Únete al canal y verifica tu acceso:", reply_markup=channel_join_keyboard())
             return
         action = data.split(":", 1)[1]
         if action == "back":
@@ -1107,29 +1231,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
         raffle = get_raffle(req["raffle_id"])
         nums = ", ".join(f"{n:02d}" for n in json.loads(req["numbers_json"]))
-        user_link = f"[{req['name']}](tg://user?id={req['user_id']})"
-        admin_claim = (
-            "🚨 *RECLAMACIÓN DE PAGO*\n\n"
-            f"Solicitud: `{req_id}`\nRifa: *{raffle['name'] if raffle else req['raffle_id']}*\n"
-            f"Participante: {user_link}\nID Telegram: `{req['user_id']}`\n"
-            f"Números: *{nums}*\nImporte reclamado: *{float(req['total_amount'] or 0):.2f} {CURRENCY}*\n\n"
-            "La reserva venció y los números ya fueron liberados. Evalúa el comprobante y, "
-            "si corresponde, gestiona la devolución del pago."
-        )
-        try:
-            await context.bot.send_message(ADMIN_ID, admin_claim, parse_mode="Markdown")
-        except Exception:
-            log.exception("No se pudo enviar el reclamo de pago al administrador")
-            await q.answer("No se pudo notificar al administrador. Inténtalo de nuevo.", show_alert=True)
-            return
-        await q.answer("Reclamo enviado al administrador.")
+        await q.answer("Envía la captura de la transferencia aquí, en privado.")
         await q.edit_message_reply_markup(reply_markup=None)
         await context.bot.send_message(
             req["origin_chat"],
-            "📨 Tu reclamación de pago fue enviada al administrador. Revisará tu caso.",
+            "📸 Para reclamar un pago, envíame ahora una captura de la transferencia en este chat privado. "
+            "No la publiques en el canal. Tapa contraseñas, códigos, saldo y datos bancarios sensibles. "
+            "Cuando la reciba, se la enviaré al administrador para que revise el caso.",
             parse_mode="Markdown"
         )
-        audit("payment_claimed", f"Solicitud {req_id}; usuario {uid}")
+        audit("payment_claimed_waiting_receipt", f"Solicitud {req_id}; usuario {uid}")
         return
 
     if data.startswith("prize:"):
@@ -1202,10 +1313,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         numbers_text = ", ".join(f"{n:02d}" for n in nums)
         if action == "ok":
             await q.edit_message_text(f"✅ Solicitud {req_id} aprobada: {numbers_text}")
+            approved_keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔑 Solicitar llave", callback_data=f"keyrequest:{req_id}")
+            ]])
             await context.bot.send_message(
                 req["origin_chat"],
                 f"✅ ¡PAGO APROBADO! Tu pago fue verificado. Números asignados: {numbers_text}. Tu jugada en «{raffle['name']}» está confirmada.",
-                parse_mode="Markdown"
+                parse_mode="Markdown", reply_markup=approved_keyboard
             )
             if CHANNEL_CHAT_ID:
                 try:
@@ -1492,6 +1606,35 @@ async def prize_receipt_photo_handler(update: Update, context: ContextTypes.DEFA
     if not message or not user or not message.photo or message.chat.type != "private":
         return
     with db() as con:
+        claim_req = con.execute(
+            "SELECT * FROM requests WHERE user_id=? AND status='claim_pending' "
+            "AND COALESCE(claim_receipt_file_id,'')='' ORDER BY created_at DESC LIMIT 1",
+            (user.id,)
+        ).fetchone()
+    if claim_req:
+        photo_file_id = message.photo[-1].file_id
+        raffle = get_raffle(claim_req["raffle_id"])
+        nums = ", ".join(f"{n:02d}" for n in json.loads(claim_req["numbers_json"]))
+        claim_caption = (
+            "🚨 RECLAMACIÓN DE PAGO · COMPROBANTE RECIBIDO\n"
+            f"Solicitud: {claim_req['id']}\nLista: {raffle['name'] if raffle else claim_req['raffle_id']}\n"
+            f"Participante: {claim_req['name']} (@{claim_req['username'] or 'sin username'})\n"
+            f"ID Telegram: {claim_req['user_id']}\nNúmeros: {nums}\n"
+            f"Importe: {float(claim_req['total_amount'] or 0):.2f} {CURRENCY}\n"
+            "Revisar comprobante y gestionar devolución si corresponde."
+        )
+        try:
+            await context.bot.send_photo(chat_id=ADMIN_ID, photo=photo_file_id, caption=claim_caption)
+            with db() as con:
+                con.execute("UPDATE requests SET claim_receipt_file_id=? WHERE id=?", (photo_file_id, claim_req["id"]))
+            await message.reply_text("✅ Captura recibida y enviada al administrador en privado. Revisará tu reclamación.")
+            audit("payment_claim_receipt_uploaded", f"Solicitud {claim_req['id']}", user.id)
+        except Exception:
+            log.exception("No se pudo enviar comprobante de reclamación al administrador")
+            await message.reply_text("No pude entregar la captura al administrador. Inténtalo nuevamente.")
+        return
+
+    with db() as con:
         winner = con.execute(
             "SELECT * FROM winners WHERE user_id=? AND receipt_pending=1 AND prize_received=0 ORDER BY id DESC LIMIT 1",
             (user.id,)
@@ -1616,9 +1759,10 @@ async def expire_reservations(app):
             for req in ready:
                 raffle = get_raffle(req["raffle_id"])
                 nums = ", ".join(f"{n:02d}" for n in json.loads(req["numbers_json"]))
-                keyboard = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("💵 YA REALICÉ EL PAGO", callback_data=f"userpaid:{req['id']}")
-                ]])
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💵 YA REALICÉ EL PAGO", callback_data=f"userpaid:{req['id']}")],
+                    [InlineKeyboardButton("🔑 Solicitar llave", callback_data=f"keyrequest:{req['id']}")]
+                ])
                 try:
                     if req["group_message_id"]:
                         await app.bot.edit_message_text(
@@ -1801,6 +1945,32 @@ async def pick3_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def welcome_channel_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Da la bienvenida en el canal cuando se detecta una nueva membresía."""
+    change = update.chat_member
+    if not change or not change.chat or change.chat.id != CHANNEL_CHAT_ID:
+        return
+    old_status = change.old_chat_member.status
+    new_status = change.new_chat_member.status
+    if new_status in {"member", "administrator", "creator"} and old_status in {"left", "kicked", "banned"}:
+        member = change.new_chat_member.user
+        if member.id == context.bot.id:
+            return
+        try:
+            await context.bot.send_message(
+                chat_id=CHANNEL_CHAT_ID,
+                text=(f"👋 ¡Bienvenido/a, {html.escape(member.first_name or 'participante')}!\n\n"
+                      "📌 Reglas del canal:\n"
+                      "• El canal publica las jugadas confirmadas para transparencia.\n"
+                      "• Para elegir números, consultar tus jugadas y recibir mensajes, usa el chat privado del bot.\n"
+                      "• Únete al canal antes de utilizar las listas y estadísticas del bot.\n\n"
+                      "👇 Abre el bot y pulsa /start para participar."),
+                parse_mode="HTML"
+            )
+        except Exception:
+            log.exception("No se pudo publicar bienvenida al nuevo miembro del canal")
+
+
 async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """No anuncia jugadas en grupos; invita a los nuevos a usar el bot en privado."""
     if not update.effective_message or not update.effective_message.new_chat_members:
@@ -1852,6 +2022,7 @@ async def main():
     app.add_handler(CommandHandler("ganador", winner_cmd))
     app.add_handler(CommandHandler("pick3", pick3_cmd))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_members))
+    app.add_handler(ChatMemberHandler(welcome_channel_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(CallbackQueryHandler(restore_callback, pattern=r"^restore:"))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, prize_receipt_photo_handler))
