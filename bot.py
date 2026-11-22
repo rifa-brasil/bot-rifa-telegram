@@ -360,17 +360,60 @@ def channel_join_keyboard():
     ])
 
 
-async def has_channel_access(bot, user_id):
-    """Comprueba membresía usando CHANNEL_CHAT_ID; el enlace privado no sirve como ID."""
+async def channel_access_status(bot, user_id):
+    """Devuelve (acceso, motivo) para no confundir un fallo de API con falta de membresía."""
     if not CHANNEL_CHAT_ID:
         log.error("CHANNEL_CHAT_ID no configurado; no se puede verificar el acceso al canal")
-        return False
+        return False, "config_missing"
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_CHAT_ID, user_id=user_id)
-        return member.status in {"member", "administrator", "creator"}
-    except Exception:
-        log.exception("No se pudo verificar membresía del usuario %s", user_id)
-        return False
+        status = member.status
+        # En supergrupos Telegram puede devolver 'restricted' con is_member=True.
+        if status in {"member", "administrator", "creator"} or (status == "restricted" and getattr(member, "is_member", False)):
+            return True, status
+        return False, status
+    except Exception as exc:
+        log.exception("No se pudo verificar membresía del usuario %s en CHANNEL_CHAT_ID=%s", user_id, CHANNEL_CHAT_ID)
+        return False, f"api_error:{type(exc).__name__}"
+
+
+async def has_channel_access(bot, user_id):
+    allowed, _reason = await channel_access_status(bot, user_id)
+    return allowed
+
+
+async def channel_diagnostic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Diagnóstico del canal para el administrador, sin exponerlo a participantes."""
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("⛔ No autorizado.")
+        return
+    if not CHANNEL_CHAT_ID:
+        await update.effective_message.reply_text(
+            "❌ CHANNEL_CHAT_ID está vacío o es 0. Configura el ID numérico del canal en las variables de entorno."
+        )
+        return
+    try:
+        chat = await context.bot.get_chat(CHANNEL_CHAT_ID)
+        bot_member = await context.bot.get_chat_member(CHANNEL_CHAT_ID, context.bot.id)
+        status = bot_member.status
+        bot_admin = status in {"administrator", "creator"}
+        await update.effective_message.reply_text(
+            "🔎 DIAGNÓSTICO DEL CANAL\n"
+            f"Canal detectado: {chat.title or 'sin título'}\n"
+            f"ID configurado: {CHANNEL_CHAT_ID}\n"
+            f"Estado del bot: {status}\n"
+            f"Bot administrador: {'sí' if bot_admin else 'NO'}\n\n"
+            + ("✅ El bot ve el canal y tiene permisos de administrador." if bot_admin else
+               "⚠️ Añade el bot como administrador del canal y vuelve a ejecutar /diagnostico_canal.")
+        )
+    except Exception as exc:
+        log.exception("Diagnóstico de canal fallido para CHANNEL_CHAT_ID=%s", CHANNEL_CHAT_ID)
+        await update.effective_message.reply_text(
+            f"❌ No puedo acceder al canal configurado (ID {CHANNEL_CHAT_ID}).\n"
+            f"Error de Telegram: {type(exc).__name__}: {exc}\n\n"
+            "Comprueba que CHANNEL_CHAT_ID sea el ID numérico correcto del canal (normalmente empieza por -100) "
+            "y que el bot esté añadido como administrador. El enlace t.me/+... no es el ID."
+        )
 
 
 async def require_channel(update, context):
@@ -1053,11 +1096,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = q.from_user.id
 
     if data == "channel:check":
-        if await has_channel_access(context.bot, uid):
+        allowed, reason = await channel_access_status(context.bot, uid)
+        if allowed:
             await q.answer("¡Acceso confirmado!")
             await q.message.reply_text("✅ Ya tienes acceso. Usa el menú para ver las listas.", reply_markup=user_keyboard())
+        elif reason == "config_missing":
+            await q.answer("El canal aún no está configurado. Avisa al administrador.", show_alert=True)
+        elif str(reason).startswith("api_error:"):
+            await q.answer("El bot no pudo consultar el canal. Avisa al administrador para revisar permisos e ID del canal.", show_alert=True)
         else:
-            await q.answer("Aún no aparece tu membresía. Únete al canal y vuelve a verificar.", show_alert=True)
+            await q.answer("Telegram aún devuelve tu estado como no miembro. Confirma que te uniste al canal correcto y vuelve a verificar.", show_alert=True)
         return
 
     if data.startswith("keyrequest:"):
@@ -2016,6 +2064,7 @@ async def main():
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("listas", lists_cmd))
     app.add_handler(CommandHandler("diagnostico", diagnostic_cmd))
+    app.add_handler(CommandHandler("diagnostico_canal", channel_diagnostic_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_error_handler(telegram_error_handler)
     app.add_handler(CommandHandler("nueva", new_raffle_cmd))
