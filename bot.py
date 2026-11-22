@@ -925,14 +925,37 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("Escribe la llave que deseas enviar.")
             return
         try:
+            req_id = pending_key["request_id"]
+            with db() as con:
+                req = con.execute(
+                    "SELECT * FROM requests WHERE id=? AND user_id=?",
+                    (req_id, pending_key["user_id"])
+                ).fetchone()
+            if not req or req["status"] not in {"key_requested", "awaiting_button"}:
+                await msg.reply_text("❌ La solicitud ya no está disponible para entregar la llave.")
+                context.user_data.pop("awaiting_key_delivery", None)
+                return
+
+            payment_keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("💵 Ya realicé el pago", callback_data=f"userpaid:{req_id}")
+            ]])
             await context.bot.send_message(
                 chat_id=pending_key["user_id"],
-                text=("🔑 LLAVE SOLICITADA\n\n" + key_text +
-                      "\n\nSi necesitas ayuda, responde a este mensaje en el chat privado del bot.")
+                text=("🔑 LLAVE PIX\n\n" + key_text +
+                      "\n\nCuando hayas realizado el pago, pulsa el botón «Ya realicé el pago»."),
+                reply_markup=payment_keyboard
             )
+            deadline = (now_utc() + timedelta(minutes=PAY_BUTTON_MINUTES)).isoformat()
+            with db() as con:
+                con.execute(
+                    """UPDATE requests
+                       SET status='awaiting_user_click',pay_button_at=?,payment_deadline_at=?
+                       WHERE id=? AND user_id=? AND status IN ('key_requested','awaiting_button')""",
+                    (iso_now(), deadline, req_id, pending_key["user_id"])
+                )
             context.user_data.pop("awaiting_key_delivery", None)
-            await msg.reply_text("✅ Llave enviada directamente al usuario.")
-            audit("manual_key_sent", f"Solicitud {pending_key['request_id']} al usuario {pending_key['user_id']}", update.effective_user.id)
+            await msg.reply_text("✅ Llave PIX enviada al participante.")
+            audit("manual_key_sent", f"Solicitud {req_id} al usuario {pending_key['user_id']}", update.effective_user.id)
         except Exception:
             log.exception("No se pudo entregar la llave al usuario")
             await msg.reply_text("❌ No se pudo enviar la llave. Comprueba que el usuario haya iniciado el bot.")
@@ -1059,11 +1082,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🏆 Premio: *{raffle['prize'] or 'Por anunciar'}*\n"
         f"💎 Valor del premio: *{raffle.get('prize_value') or 'Por definir'}*\n\n"
         f"Realiza el pago dentro de los próximos {RESERVATION_MINUTES} minutos. "
-        "Después aparecerá un botón para avisar que ya pagaste."
+        "Pulsa «Solicitar Llave PIX» para recibir la llave de pago por este chat privado."
     )
     try:
         key_keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔑 Solicitar llave", callback_data=f"keyrequest:{req_id}")
+            InlineKeyboardButton("🔑 Solicitar Llave PIX", callback_data=f"keyrequest:{req_id}")
         ]])
         sent = await context.bot.send_message(
             chat_id=update.effective_chat.id, text=request_text, parse_mode="Markdown",
@@ -1071,11 +1094,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         with db() as con:
             con.execute("UPDATE requests SET group_message_id=? WHERE id=?", (sent.message_id, req_id))
-        await msg.reply_text(
-            f"✅ Tu solicitud de la {raffle['name']} está aquí, en tu chat privado. "
-            "Realiza el pago y espera a que aparezca el botón para notificarlo.",
-            reply_markup=user_keyboard()
-        )
     except Exception:
         log.exception("No se pudo enviar la solicitud al chat privado")
         # Si no se pudo publicar, liberar la reserva para no bloquear números sin aviso.
@@ -1115,12 +1133,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not req or uid != req["user_id"]:
             await q.answer("Esta solicitud no te pertenece.", show_alert=True)
             return
-        if req["status"] not in {"awaiting_button", "awaiting_user_click", "payment_reported", "approved"}:
-            await q.answer("La solicitud ya no está activa.", show_alert=True)
+        if req["status"] not in {"awaiting_button", "key_requested"}:
+            await q.answer("La solicitud ya no está disponible para solicitar la llave.", show_alert=True)
+            return
+        if req["status"] == "key_requested":
+            await q.answer("La solicitud de llave ya fue enviada al administrador.", show_alert=True)
             return
         raffle = get_raffle(req["raffle_id"])
         nums = ", ".join(f"{n:02d}" for n in json.loads(req["numbers_json"]))
-        await q.answer("Solicitud de llave enviada al administrador.")
         admin_text = (
             "🔑 *SOLICITUD DE LLAVE*\n\n"
             f"Solicitud: `{req_id}`\nLista: *{raffle['name'] if raffle else req['raffle_id']}*\n"
@@ -1129,14 +1149,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Pulsa «Responder con llave» y después escribe aquí la llave que deseas enviar."
         )
         key_admin_keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✉️ Responder con llave", callback_data=f"keyreply:{req['user_id']}:{req_id}")
+            InlineKeyboardButton("✉️ Enviar llave PIX", callback_data=f"keyreply:{req['user_id']}:{req_id}")
         ]])
         try:
             await context.bot.send_message(ADMIN_ID, admin_text, parse_mode="Markdown", reply_markup=key_admin_keyboard)
-            await q.message.reply_text("📨 Ya avisé al administrador. Te enviará la llave aquí, en este chat privado.")
+            with db() as con:
+                con.execute(
+                    "UPDATE requests SET status='key_requested' WHERE id=? AND status='awaiting_button'",
+                    (req_id,)
+                )
+            await q.answer("Solicitud de llave PIX enviada.")
         except Exception:
             log.exception("No se pudo notificar solicitud de llave")
-            await q.answer("No pude avisar al administrador. Inténtalo de nuevo.", show_alert=True)
+            await q.answer("No se pudo enviar la solicitud. Inténtalo de nuevo.", show_alert=True)
         return
 
     if data.startswith("keyreply:"):
@@ -1184,7 +1209,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     (uid,)
                 ).fetchall()
                 pending = con.execute(
-                    "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','awaiting_user_click','payment_reported','claim_pending') ORDER BY rq.created_at DESC LIMIT 20",
+                    "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','payment_reported','claim_pending') ORDER BY rq.created_at DESC LIMIT 20",
                     (uid,)
                 ).fetchall()
             else:
@@ -1226,7 +1251,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "UPDATE requests SET status='payment_reported',reported_at=? WHERE id=? AND status='awaiting_user_click'",
                 (iso_now(), req_id)
             )
-        await q.answer("Aviso de pago enviado al administrador.")
+        await q.answer("Gracias. Tu aviso de pago quedó registrado.")
         await q.edit_message_reply_markup(reply_markup=None)
         raffle = get_raffle(req["raffle_id"])
         nums = ", ".join(f"{n:02d}" for n in json.loads(req["numbers_json"]))
@@ -1249,12 +1274,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(req["origin_chat"],
                 f"⚠️ [{req['name']}](tg://user?id={req['user_id']}) indicó que pagó, pero no se pudo notificar al administrador. "
                 "Contacta directamente con él.", parse_mode="Markdown")
-        await context.bot.send_message(
-            req["origin_chat"],
-            f"📨 [{req['name']}](tg://user?id={req['user_id']}) ha indicado que realizó el pago de la {raffle['name']}. "
-            "El pago está pendiente de verificación del administrador.",
-            parse_mode="Markdown"
-        )
         audit("payment_reported_by_user", f"Solicitud {req_id}; usuario {uid}")
         return
 
@@ -1798,45 +1817,9 @@ async def expire_reservations(app):
     while True:
         try:
             now = iso_now()
-            # Stage 1: five minutes after request creation, reveal the "I paid" button.
-            with db() as con:
-                ready = con.execute(
-                    "SELECT * FROM requests WHERE status='awaiting_button' AND expires_at<=?",
-                    (now,)
-                ).fetchall()
-            for req in ready:
-                raffle = get_raffle(req["raffle_id"])
-                nums = ", ".join(f"{n:02d}" for n in json.loads(req["numbers_json"]))
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💵 YA REALICÉ EL PAGO", callback_data=f"userpaid:{req['id']}")],
-                    [InlineKeyboardButton("🔑 Solicitar llave", callback_data=f"keyrequest:{req['id']}")]
-                ])
-                try:
-                    if req["group_message_id"]:
-                        await app.bot.edit_message_text(
-                            chat_id=req["origin_chat"], message_id=req["group_message_id"],
-                            text=(
-                                f"⏳ *SOLICITUD EN PROCESO*\n\nLista: *{raffle['name']}*\n"
-                                f"Participante: [{req['name']}](tg://user?id={req['user_id']})\nNúmeros: *{nums}*\n"
-                                f"Precio por número: *{float(req['price_per_number'] or 0):.2f} {CURRENCY}*\n"
-                                f"Total a pagar: *{float(req['total_amount'] or 0):.2f} {CURRENCY}*\n"
-                                f"Premio: *{raffle['prize'] or 'Por anunciar'}*\n"
-                                f"Valor del premio: *{raffle['prize_value'] or 'Por definir'}*\n\n"
-                                "Los primeros 5 minutos son para realizar el pago. Ahora tienes otros 5 minutos "
-                                "para pulsar «YA REALICÉ EL PAGO» y avisar. Si no avisas, se liberarán "
-                                "los números y la jugada quedará como no completada. Si pagaste, podrás "
-                                "pulsar «Reclamar Pago» para solicitar una revisión."
-                            ), parse_mode="Markdown", reply_markup=keyboard
-                        )
-                    with db() as con:
-                        con.execute(
-                            "UPDATE requests SET status='awaiting_user_click',pay_button_at=?,payment_deadline_at=? "
-                            "WHERE id=? AND status='awaiting_button'",
-                            (iso_now(), (now_utc() + timedelta(minutes=PAY_BUTTON_MINUTES)).isoformat(), req["id"])
-                        )
-                except Exception:
-                    log.exception("No se pudo mostrar botón de pago para solicitud %s", req["id"])
-                    # Si no se pudo mostrar el botón, no se libera inmediatamente: se reintentará.
+            # El botón «Ya realicé el pago» se entrega junto con la llave PIX
+            # cuando el administrador la envía manualmente. El temporizador solo
+            # controla el plazo posterior a esa entrega.
 
             # Stage 2: if user did not click within the second 5-minute window, release numbers.
             with db() as con:
