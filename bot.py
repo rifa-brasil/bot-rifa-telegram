@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 23
+Bot de rifas Telegram - versión 24
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -691,7 +691,7 @@ def admin_keyboard():
             [KeyboardButton("➕ Crear lista"), KeyboardButton("📋 Listas activas")],
             [KeyboardButton("📊 Estadísticas"), KeyboardButton("🏆 Indicar Número Ganador")],
             [KeyboardButton("🔄 Resetear lista"), KeyboardButton("🗑️ Borrar lista")],
-            [KeyboardButton("👥 Historial"), KeyboardButton("👥 Usuarios Registrados")],
+            [KeyboardButton("👥 Historial")],
             [KeyboardButton("🔒 Bloquear jugadas"), KeyboardButton("🔓 Desbloquear jugadas")],
             [KeyboardButton("💾 Crear respaldo"), KeyboardButton("♻️ Restaurar respaldo")],
             [KeyboardButton("🔄 Actualizar panel")],
