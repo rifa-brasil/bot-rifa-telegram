@@ -75,6 +75,25 @@ TELETHON_SESSION = os.getenv("TELETHON_SESSION", "")
 
 user_client = None
 db_lock = asyncio.Lock()
+web_runner = None
+
+
+async def start_web_server():
+    """Inicia un endpoint HTTP sencillo para el health check de Render."""
+    global web_runner
+
+    async def health(_request):
+        return web.json_response({"status": "ok", "service": "telegram-raffle-bot"})
+
+    web_app = web.Application()
+    web_app.router.add_get("/", health)
+    web_app.router.add_get("/health", health)
+
+    web_runner = web.AppRunner(web_app)
+    await web_runner.setup()
+    site = web.TCPSite(web_runner, "0.0.0.0", PORT)
+    await site.start()
+    log.info("Servidor web de salud activo en 0.0.0.0:%s", PORT)
 
 
 def now_utc():
@@ -3060,6 +3079,8 @@ async def main():
         await app.shutdown()
         if user_client:
             await user_client.disconnect()
+        if web_runner:
+            await web_runner.cleanup()
 
 
 if __name__ == "__main__":
