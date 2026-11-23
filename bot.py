@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 5
+Bot de rifas Telegram - versión 6
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -57,6 +57,8 @@ CURRENCY = "R$"  # Todos los valores de la rifa se expresan en reales brasileño
 FLORIDA_PICK3_PDF = "https://files.floridalottery.com/exptkt/p3.pdf"
 FLORIDA_PICK3_ANDROID_URL = "https://play.google.com/store/apps/details?id=com.flalottery.FLALOTTERY"
 FLORIDA_PICK3_IOS_URL = "https://apps.apple.com/us/app/florida-lottery/id476160599"
+# El enlace definitivo de descarga será configurado cuando lo proporcione el administrador.
+DOWNLOAD_APP_URL = os.getenv("DOWNLOAD_APP_URL", "").strip()
 PICK3_AUTO_ANNOUNCE = os.getenv("PICK3_AUTO_ANNOUNCE", "false").lower() == "true"
 PICK3_DRAW = os.getenv("PICK3_DRAW", "E").upper()  # M=mediodía, E=noche
 
@@ -109,7 +111,8 @@ def init_db():
             first_name TEXT DEFAULT '',
             username TEXT DEFAULT '',
             joined_at TEXT NOT NULL,
-            channel_member INTEGER NOT NULL DEFAULT 0
+            channel_member INTEGER NOT NULL DEFAULT 0,
+            playing_blocked INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS raffles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -201,6 +204,8 @@ def init_db():
         bot_user_columns = {r[1] for r in con.execute("PRAGMA table_info(bot_users)")}
         if "channel_member" not in bot_user_columns:
             con.execute("ALTER TABLE bot_users ADD COLUMN channel_member INTEGER NOT NULL DEFAULT 0")
+        if "playing_blocked" not in bot_user_columns:
+            con.execute("ALTER TABLE bot_users ADD COLUMN playing_blocked INTEGER NOT NULL DEFAULT 0")
         # Migraciones para publicación en canal y comprobante de recepción del premio.
         winner_columns = {r[1] for r in con.execute("PRAGMA table_info(winners)")}
         for col, declaration in [
@@ -460,8 +465,10 @@ ADMIN_MENU_ACTIONS = {
     "♻️ Restaurar respaldo": "restore",
     "👥 Historial": "history",
     "👥 Usuarios actuales": "users",
-    "🔒 Bloquear jugadas": "block",
-    "🔓 Desbloquear jugadas": "unblock",
+    "🔒 Bloquear jugadas (todos)": "block",
+    "🔓 Desbloquear jugadas (todos)": "unblock",
+    "🚫 Bloquear usuario": "block_user",
+    "✅ Desbloquear usuario": "unblock_user",
     "🔄 Actualizar panel": "back",
 }
 
@@ -473,12 +480,13 @@ def channel_join_keyboard():
 
 
 def florida_links_keyboard():
-    """Accesos directos oficiales/de consulta de Florida Pick 3 en el chat privado."""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎯 Consultar resultado Florida Pick 3", url=FLORIDA_PICK3_PDF)],
-        [InlineKeyboardButton("📲 Descargar Florida Lottery · Android", url=FLORIDA_PICK3_ANDROID_URL)],
-        [InlineKeyboardButton("🍎 Descargar Florida Lottery · iPhone", url=FLORIDA_PICK3_IOS_URL)],
-    ])
+    """Enlaces oficiales de consulta; el enlace de descarga final se configurará al recibirlo."""
+    rows = [[InlineKeyboardButton("🎯 Consultar resultado Florida Pick 3", url=FLORIDA_PICK3_PDF)]]
+    if DOWNLOAD_APP_URL:
+        rows.append([InlineKeyboardButton("📲 Descargar aplicación", url=DOWNLOAD_APP_URL)])
+    else:
+        rows.append([InlineKeyboardButton("📲 Enlace de descarga pendiente", callback_data="download_pending")])
+    return InlineKeyboardMarkup(rows)
 
 
 def eligible_user_count():
@@ -617,17 +625,55 @@ async def require_channel(update, context):
     return False
 
 
+def current_progress_label():
+    """Progreso de la lista activa más reciente para mostrarlo en el panel fijo."""
+    with db() as con:
+        row = con.execute("SELECT id,name,total_numbers FROM raffles WHERE status='active' ORDER BY id DESC LIMIT 1").fetchone()
+        if not row:
+            return "📊 Sin lista activa · 0/100 · 0%"
+        occupied = con.execute("SELECT COUNT(*) FROM numbers WHERE raffle_id=? AND status IN ('occupied','pending')", (row['id'],)).fetchone()[0]
+    total = max(int(row['total_numbers'] or 100), 1)
+    percent = int(round(occupied * 100 / total))
+    width = 8
+    filled = int(round(occupied * width / total))
+    bar = "🟩" * filled + "⬜" * (width-filled)
+    return f"{bar} {occupied}/{total} · {percent}%"
+
+
 def user_keyboard():
-    """Panel principal: todas las consultas están disponibles sin submenús."""
+    """Panel principal con el indicador de avance en la primera fila."""
     return ReplyKeyboardMarkup(
         [
+            [KeyboardButton("📊 Progreso: " + current_progress_label())],
             [KeyboardButton("🎟️ Ver listas activas"), KeyboardButton("🎟️ Mis jugadas")],
             [KeyboardButton("💳 Historial de pagos"), KeyboardButton("🏆 Mis premios")],
             [KeyboardButton("📚 Resultados y ganadores"), KeyboardButton("🆘 Ayuda / soporte")],
+            [KeyboardButton("🎯 Consultar tiro Florida"), KeyboardButton("📲 Descargar aplicación")],
         ],
         resize_keyboard=True, is_persistent=True,
         input_field_placeholder="Selecciona una opción"
     )
+
+
+async def refresh_user_progress_panels(context, raffle_id):
+    """Envía la barra actualizada a usuarios registrados para renovar su teclado persistente."""
+    raffle = get_raffle(raffle_id)
+    if not raffle:
+        return
+    st = stats(raffle_id)
+    in_use = st['occupied'] + st['pending']
+    text = (f"📊 AVANCE DE LA LISTA «{raffle['name']}»\n"
+            f"{progress_bar(in_use, st['total'])}\n"
+            f"{in_use} de {st['total']} números ocupados o en proceso ({int(round(in_use*100/max(st['total'],1)))}%).\n"
+            f"Quedan {st['available']} disponibles.")
+    with db() as con:
+        ids = [int(r[0]) for r in con.execute("SELECT user_id FROM bot_users").fetchall()]
+    for user_id in ids:
+        try:
+            await context.bot.send_message(user_id, text, reply_markup=user_keyboard())
+        except Exception:
+            log.debug("No se pudo actualizar el panel de progreso del usuario %s", user_id, exc_info=True)
+        await asyncio.sleep(0.035)
 
 
 def build_user_stats(uid, action):
@@ -838,7 +884,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🏆 *Premio*\n"
             "El premio anunciado para cada lista corresponde al 70%–80% de la recaudación total, según el porcentaje definido para esa lista. Ejemplo: 100 números a R$ 10 generan R$ 1.000 y un premio de R$ 700 a R$ 800, según las condiciones publicadas.\n\n"
             "🔎 *Verificación del resultado*\n"
-            "Puedes consultar el resultado oficial de Florida Pick 3 o descargar la aplicación Florida Lottery con los accesos directos que aparecen debajo de este mensaje.\n\n"
+            "En el menú fijo encontrarás los botones para consultar Florida Pick 3 y descargar la aplicación.\n\n"
             f"👥 *Participantes actuales:* {current_count}/100 usuarios registrados en el bot y miembros del canal. El administrador habilitará las jugadas manualmente cuando lo considere oportuno.\n\n"
             "📌 Cada botón del menú principal abre directamente la consulta correspondiente, sin submenús."
         )
@@ -849,7 +895,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Recuerda que no hay resultado ganador hasta que los 100 números de una lista estén ocupados y los pagos confirmados."
         )
     await update.effective_message.reply_text(
-        welcome, parse_mode="Markdown", reply_markup=florida_links_keyboard()
+        welcome, parse_mode="Markdown"
     )
     await update.effective_message.reply_text(
         "👇 *PANEL PRINCIPAL*\nCada botón muestra directamente su información:",
@@ -1092,8 +1138,8 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         context.user_data.pop("admin_flow", None)
     if action == "block":
         set_playing_enabled(False)
-        await msg.reply_text("🔒 Las jugadas quedaron BLOQUEADAS. Los usuarios podrán consultar, pero no reservar números.\n\n" + play_status_text(), reply_markup=admin_keyboard())
-        audit("playing_blocked", "El administrador bloqueó nuevas jugadas", update.effective_user.id)
+        await msg.reply_text("🔒 Las jugadas quedaron BLOQUEADAS para todos los participantes. El administrador puede volver a habilitarlas desde este panel.\n\n" + play_status_text(), reply_markup=admin_keyboard())
+        audit("playing_blocked", "El administrador bloqueó nuevas jugadas globalmente", update.effective_user.id)
         return
     if action == "unblock":
         count = eligible_user_count()
@@ -1101,15 +1147,24 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await msg.reply_text(f"⚠️ Aún no se alcanzan los 100 usuarios. Hay {count}/100. No desbloqueé las jugadas.", reply_markup=admin_keyboard())
             return
         set_playing_enabled(True)
-        await msg.reply_text("🔓 ¡Jugadas DESBLOQUEADAS! Los participantes ya pueden reservar números.\n\n" + play_status_text(), reply_markup=admin_keyboard())
+        await msg.reply_text("🔓 ¡Jugadas DESBLOQUEADAS para los participantes que no tengan bloqueo individual!\n\n" + play_status_text(), reply_markup=admin_keyboard())
         with db() as con:
-            ids = [int(r[0]) for r in con.execute("SELECT user_id FROM bot_users WHERE channel_member=1").fetchall()]
+            ids = [int(r[0]) for r in con.execute("SELECT user_id FROM bot_users WHERE channel_member=1 AND playing_blocked=0").fetchall()]
         for user_id in ids:
             try:
-                await context.bot.send_message(user_id, "🎉 ¡EL ADMINISTRADOR HABILITÓ LAS JUGADAS! Ya puedes entrar en «Ver listas activas» y escoger tus números.", reply_markup=user_keyboard())
+                await context.bot.send_message(user_id, "🎉 ¡EL ADMINISTRADOR HABILITÓ LAS JUGADAS! Ya puedes entrar en «Ver listas activas» y escoger tus números, salvo que tengas un bloqueo individual.", reply_markup=user_keyboard())
             except Exception:
                 pass
         audit("playing_unblocked", f"Jugadas habilitadas con {count} usuarios elegibles", update.effective_user.id)
+        return
+    if action in {"block_user", "unblock_user"}:
+        context.user_data["awaiting_user_play_control"] = "block" if action == "block_user" else "unblock"
+        verb = "bloquear" if action == "block_user" else "desbloquear"
+        await msg.reply_text(
+            f"Escribe el ID numérico o @usuario registrado al que deseas {verb}.\n"
+            "Puedes obtener el ID desde el aviso de registro o desde el historial de usuarios.",
+            reply_markup=admin_keyboard()
+        )
         return
     if action == "users":
         await msg.reply_text("👥 ESTADO DE PARTICIPANTES\n\n" + play_status_text(), reply_markup=admin_keyboard())
@@ -1225,6 +1280,38 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("🔒 Para jugar, abre el chat privado del bot y pulsa /start. Las jugadas no se realizan en el grupo.")
         return
 
+    # Bloqueo/desbloqueo individual de participantes registrados, exclusivo del administrador.
+    play_control = context.user_data.get("awaiting_user_play_control")
+    if is_admin(update.effective_user.id) and play_control:
+        target_text = text.strip()
+        with db() as con:
+            if target_text.startswith("@"):
+                target = con.execute("SELECT user_id,first_name,username FROM bot_users WHERE lower(username)=lower(?)", (target_text[1:],)).fetchone()
+            else:
+                try:
+                    target_id = int(target_text)
+                except ValueError:
+                    target_id = 0
+                target = con.execute("SELECT user_id,first_name,username FROM bot_users WHERE user_id=?", (target_id,)).fetchone()
+            if not target:
+                await msg.reply_text("❌ No encontré ese usuario registrado. Comprueba el ID o @usuario e inténtalo de nuevo.", reply_markup=admin_keyboard())
+                return
+            blocked = 1 if play_control == "block" else 0
+            con.execute("UPDATE bot_users SET playing_blocked=? WHERE user_id=?", (blocked, target["user_id"]))
+        context.user_data.pop("awaiting_user_play_control", None)
+        action_name = "playing_user_blocked" if blocked else "playing_user_unblocked"
+        audit(action_name, f"Usuario {target['user_id']} (@{target['username'] or 'sin_username'})", update.effective_user.id)
+        status_text = "🔒 Tus jugadas han sido bloqueadas por el administrador. Puedes seguir consultando las listas y tu historial." if blocked else "🔓 El administrador ha desbloqueado tus jugadas. Ya puedes participar si las jugadas generales están habilitadas."
+        try:
+            await context.bot.send_message(int(target["user_id"]), status_text, reply_markup=user_keyboard())
+        except Exception:
+            log.info("No se pudo notificar al usuario %s", target["user_id"], exc_info=True)
+        await msg.reply_text(
+            f"{'🔒 Bloqueado' if blocked else '🔓 Desbloqueado'}: {target['first_name']} · ID {target['user_id']}.",
+            reply_markup=admin_keyboard()
+        )
+        return
+
     # Respuesta directa a una consulta de soporte; el botón identifica al remitente exacto.
     support_target = context.user_data.get("awaiting_support_reply")
     if is_admin(update.effective_user.id) and support_target:
@@ -1309,6 +1396,15 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🏆 Mis premios": "prizes",
             "📚 Resultados y ganadores": "history",
         }
+        if text == "🎯 Consultar tiro Florida":
+            await msg.reply_text("🎯 Consulta el resultado oficial de Florida Pick 3:", reply_markup=florida_links_keyboard())
+            return
+        if text == "📲 Descargar aplicación":
+            if DOWNLOAD_APP_URL:
+                await msg.reply_text("📲 Pulsa el enlace para descargar la aplicación:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Descargar aplicación", url=DOWNLOAD_APP_URL)]]))
+            else:
+                await msg.reply_text("El administrador todavía debe proporcionar el enlace de descarga de la aplicación.")
+            return
         if text in direct_actions:
             title, body = build_user_stats(update.effective_user.id, direct_actions[text])
             await msg.reply_text(title + "\n\n" + body, parse_mode="Markdown", reply_markup=user_keyboard())
@@ -1359,6 +1455,14 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not is_admin(update.effective_user.id):
+        with db() as con:
+            user_block = con.execute("SELECT playing_blocked FROM bot_users WHERE user_id=?", (update.effective_user.id,)).fetchone()
+        if user_block and int(user_block["playing_blocked"] or 0):
+            await msg.reply_text(
+                "🔒 *TUS JUGADAS ESTÁN BLOQUEADAS*\n\nEl administrador ha bloqueado temporalmente tu posibilidad de reservar números. Puedes seguir consultando las listas y tu historial.",
+                parse_mode="Markdown", reply_markup=user_keyboard()
+            )
+            return
         eligible = eligible_user_count()
         if eligible < 100 or not is_playing_enabled():
             await msg.reply_text(
@@ -1470,6 +1574,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with db() as con:
             con.execute("UPDATE requests SET group_message_id=? WHERE id=?", (sent.message_id, req_id))
         await refresh_raffle_progress_messages(context, raffle["id"])
+        await refresh_user_progress_panels(context, raffle["id"])
     except Exception:
         log.exception("No se pudo enviar la solicitud al chat privado")
         # Si no se pudo publicar, liberar la reserva para no bloquear números sin aviso.
@@ -1636,6 +1741,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
+        return
+
+    if data == "download_pending":
+        await q.answer("El enlace de descarga definitivo está pendiente de que lo proporcione el administrador.", show_alert=True)
         return
 
     if data.startswith("supportreply:"):
@@ -1977,6 +2086,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     log.exception("No se pudo publicar la jugada confirmada en el canal")
             await refresh_raffle_progress_messages(context, req["raffle_id"])
+            await refresh_user_progress_panels(context, req["raffle_id"])
             st_after = stats(req["raffle_id"])
             if st_after and st_after["available"] <= max(5, int(st_after["total"] * 0.10)) and st_after["available"] > 0:
                 milestone = f"near_completion_{req['raffle_id']}"
@@ -2004,6 +2114,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
             await refresh_raffle_progress_messages(context, req["raffle_id"])
+            await refresh_user_progress_panels(context, req["raffle_id"])
         audit("payment_" + status, f"Solicitud {req_id}; números {numbers_text}", uid)
         return
 
@@ -2741,12 +2852,11 @@ async def welcome_channel_member(update: Update, context: ContextTypes.DEFAULT_T
                 "🏆 SORTEO Y PREMIO\n"
                 "IMPORTANTE: mientras no estén ocupados los 100 números de una lista y confirmados los pagos correspondientes, no hay resultado ganador para esa lista. Solo cuando se complete se utiliza el resultado nocturno de Florida Pick 3. Si se completa antes de las 21:00 (hora de Florida), se toma el sorteo de esa noche; si se completa después, el de la noche siguiente. El premio será del 70% al 80% de la recaudación, según lo publicado en cada lista.\n\n"
                 "🔎 VERIFICACIÓN\n"
-                "Consulta el resultado oficial de Florida Lottery mediante los accesos directos de abajo y compáralo con el resultado publicado por el bot.\n\n"
+                "Consulta el resultado oficial de Florida Lottery desde los botones del menú privado del bot.\n\n"
                 "👇 Abre el bot y pulsa /start. Cuando haya 100 usuarios registrados en el bot y miembros del canal, el administrador recibirá un aviso y podrá desbloquear manualmente las jugadas."
             )
             await context.bot.send_message(
-                chat_id=CHANNEL_CHAT_ID, text=info_text, parse_mode="HTML",
-                reply_markup=florida_links_keyboard()
+                chat_id=CHANNEL_CHAT_ID, text=info_text, parse_mode="HTML"
             )
         except Exception:
             log.exception("No se pudo publicar bienvenida al nuevo miembro del canal")
