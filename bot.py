@@ -371,27 +371,85 @@ def set_playing_enabled(enabled):
 
 
 def participant_progress_label():
-    """Muestra el total general de usuarios elegibles, sin barra ni límite máximo."""
+    """Texto compacto y no interactivo para informar el avance hacia 100 usuarios."""
     count = eligible_user_count()
-    return f"👥 Contador de Usuarios · {count} registrados"
+    return f"👥 {count}/100 usuarios registrados"
 
 
 def play_status_text():
-    return (participant_progress_label() + "\n"
+    return (participant_progress_label() + "\n" +
             f"🎟️ Jugadas: {'HABILITADAS' if is_playing_enabled() else 'BLOQUEADAS'}")
 
 
-async def notify_member_count(context, count):
-    """Actualiza el contador y alerta al llegar al mínimo de 100; el admin habilita manualmente."""
-    if count < 100:
+def _get_setting(key):
+    with db() as con:
+        row = con.execute("SELECT setting_value FROM bot_settings WHERE setting_key=?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def _set_setting(key, value):
+    with db() as con:
+        con.execute(
+            "INSERT INTO bot_settings(setting_key,setting_value) VALUES(?,?) "
+            "ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value",
+            (key, str(value))
+        )
+
+
+async def update_admin_counter(context, count=None):
+    """Crea o edita un único mensaje pequeño, sin teclado ni botones, en el chat del admin."""
+    if not ADMIN_ID:
+        return
+    count = eligible_user_count() if count is None else int(count)
+    text = f"👥 {count}/100 usuarios registrados"
+    message_id = _get_setting("admin_counter_message_id")
+    if message_id:
         try:
-            await context.bot.send_message(
-                ADMIN_ID,
-                f"👥 Contador de Usuarios: {count} registrados.\nFaltan {100-count} para llegar al mínimo de 100 y poder desbloquear las jugadas.",
-                reply_markup=admin_keyboard()
+            await context.bot.edit_message_text(
+                chat_id=ADMIN_ID, message_id=int(message_id), text=text
             )
+            return
+        except Exception as exc:
+            # Si el mensaje fue borrado o ya no se puede editar, se crea uno nuevo.
+            log.info("Se renovará el mensaje contador del administrador: %s", exc)
+    try:
+        sent = await context.bot.send_message(chat_id=ADMIN_ID, text=text)
+        _set_setting("admin_counter_message_id", sent.message_id)
+    except Exception:
+        log.exception("No se pudo crear/actualizar el contador compacto del administrador")
+
+
+async def broadcast_unlocked_lists(context, raffle_names):
+    """Notifica a los participantes cuando el administrador habilita listas concretas."""
+    names = list(dict.fromkeys(str(name) for name in raffle_names if name))
+    if not names:
+        return
+    with db() as con:
+        user_ids = [int(r[0]) for r in con.execute(
+            "SELECT user_id FROM bot_users WHERE channel_member=1 ORDER BY joined_at"
+        ).fetchall()]
+    names_text = "\n".join(f"🎟️ {name}" for name in names)
+    message = (
+        "🎉 ¡YA PUEDES JUGAR!\n\n"
+        "El administrador ha desbloqueado las siguientes listas:\n\n"
+        f"{names_text}\n\n"
+        "Entra en «🎟️ Ver listas activas» en el menú del bot para consultar los números disponibles y participar."
+    )
+    sent = 0
+    for user_id in user_ids:
+        try:
+            await context.bot.send_message(chat_id=user_id, text=message, reply_markup=user_keyboard())
+            sent += 1
         except Exception:
-            log.exception("No se pudo actualizar el contador del administrador")
+            log.info("No se pudo avisar del desbloqueo al usuario %s", user_id, exc_info=True)
+        await asyncio.sleep(0.05)
+    log.info("Aviso de listas desbloqueadas enviado a %s de %s usuarios", sent, len(user_ids))
+
+
+async def notify_member_count(context, count):
+    """Actualiza el contador en tiempo real y avisa al admin una sola vez al llegar a 100."""
+    await update_admin_counter(context, count)
+    if count < 100:
         return
 
     with db() as con:
@@ -408,13 +466,12 @@ async def notify_member_count(context, count):
         await context.bot.send_message(
             ADMIN_ID,
             "🎉 ¡SE ALCANZÓ EL MÍNIMO DE 100 USUARIOS!\n\n"
-            "Ya puedes pulsar «🔓 Desbloquear jugadas» desde tu panel. "
-            "Los usuarios recibirán el aviso de que las jugadas están habilitadas cuando confirmes el desbloqueo.",
+            "Ya puedes desbloquear una lista o todas desde «🔓 Desbloquear jugadas». "
+            "Al desbloquearlas, los participantes recibirán automáticamente un aviso.",
             reply_markup=admin_keyboard()
         )
     except Exception:
         log.exception("No se pudo avisar al administrador al alcanzar 100 usuarios")
-    await notify_threshold_reached(context, count)
 
 
 async def notify_user_ready(context, user_id, count):
@@ -757,6 +814,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user = update.effective_user
     if is_admin(user.id):
+        await update_admin_counter(context)
         await update.effective_message.reply_text(
             "⚙️ PANEL DE ADMINISTRACIÓN\nSelecciona una opción. Los botones permanecerán visibles aquí:",
             reply_markup=admin_keyboard()
@@ -809,9 +867,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome, parse_mode="Markdown"
     )
     await update.effective_message.reply_text(
-        f"📊 PARTICIPANTES\n{participant_progress_label()}",
-    )
-    await update.effective_message.reply_text(
         "👇 *PANEL PRINCIPAL*\nCada botón muestra directamente su información:",
         parse_mode="Markdown", reply_markup=user_keyboard()
     )
@@ -858,8 +913,9 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         await update.effective_message.reply_text("Por seguridad, abre el chat privado del bot y escribe /admin.")
         return
+    await update_admin_counter(context)
     await update.effective_message.reply_text(
-        f"📊 INFORMACIÓN DE PARTICIPANTES\n{participant_progress_label()}\nEstado general: {'JUGADAS HABILITADAS' if is_playing_enabled() else 'JUGADAS BLOQUEADAS'}"
+        f"🎟️ Estado general: {'JUGADAS HABILITADAS' if is_playing_enabled() else 'JUGADAS BLOQUEADAS'}"
     )
     await update.effective_message.reply_text(
         "⚙️ PANEL DE ADMINISTRACIÓN\nSelecciona una operación. Los botones permanecerán visibles aquí:",
@@ -2288,8 +2344,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_status = "blocked" if block_action else "active"
         old_status = "active" if block_action else "blocked"
         selected = data.split(":", 1)[1]
+        unlocked_names = []
         with db() as con:
             if selected == "all":
+                if not block_action:
+                    unlocked_names = [r["name"] for r in con.execute(
+                        "SELECT name FROM raffles WHERE status=? ORDER BY id", (old_status,)
+                    ).fetchall()]
                 cur = con.execute("UPDATE raffles SET status=? WHERE status=?", (new_status, old_status))
                 changed = cur.rowcount
                 label = "todas las listas"
@@ -2306,6 +2367,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 con.execute("UPDATE raffles SET status=? WHERE id=?", (new_status, raffle_id))
                 changed = 1
                 label = f"{row['name']} (#{raffle_id})"
+                if not block_action:
+                    unlocked_names = [row["name"]]
+        # El bloqueo general refleja si queda al menos una lista activa.
+        with db() as con:
+            active_count = int(con.execute("SELECT COUNT(*) FROM raffles WHERE status='active'").fetchone()[0])
+        set_playing_enabled(active_count > 0)
         await q.answer("Listo")
         if changed:
             verb_done = "bloqueadas" if block_action else "desbloqueadas"
@@ -2315,6 +2382,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             audit("raffles_blocked" if block_action else "raffles_unblocked",
                   f"{label}; cantidad={changed}", uid)
+            if not block_action and unlocked_names:
+                await broadcast_unlocked_lists(context, unlocked_names)
         else:
             await q.message.reply_text("No había listas que cambiar en esa selección.", reply_markup=admin_keyboard())
         return
@@ -3207,6 +3276,7 @@ async def main():
         # post_init no se ejecuta al usar initialize/start manualmente.
         await post_init(app)
         await sync_known_channel_members(app.bot)
+        await update_admin_counter(type("Context", (), {"bot": app.bot})())
         if app.updater is None:
             raise RuntimeError("Application no tiene Updater; no se puede iniciar polling.")
         await app.updater.start_polling(
