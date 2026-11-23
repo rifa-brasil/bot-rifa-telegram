@@ -55,7 +55,11 @@ RESERVATION_MINUTES = 5  # Primera ventana: 5 min para realizar el pago
 PAY_BUTTON_MINUTES = 5   # Compatibilidad; el botón de pago no caduca
 CURRENCY = "R$"  # Todos los valores de la rifa se expresan en reales brasileños
 # Añadir las llaves cuando el administrador las facilite: (nombre visible, llave PIX).
-PIX_KEYS = []
+PIX_KEYS = [
+    ("PIX teléfono", "11948824359"),
+    ("PIX correo 1", "yordanisreyes@gmail.com"),
+    ("PIX correo 2", "yordanismydan@gmail.com"),
+]
 FLORIDA_PICK3_PDF = "https://files.floridalottery.com/exptkt/p3.pdf"
 FLORIDA_PICK3_ANDROID_URL = "https://play.google.com/store/apps/details?id=com.flalottery.FLALOTTERY"
 FLORIDA_PICK3_IOS_URL = "https://apps.apple.com/us/app/florida-lottery/id476160599"
