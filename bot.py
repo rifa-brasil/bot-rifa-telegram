@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 18
+Bot de rifas Telegram - versión 19
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -373,7 +373,7 @@ def set_playing_enabled(enabled):
 def participant_progress_label():
     """Texto compacto y no interactivo para informar el avance hacia 100 usuarios."""
     count = eligible_user_count()
-    return f"👥 {count}/100 usuarios registrados"
+    return f"Cantidad usuarios: {count} Registrados"
 
 
 def play_status_text():
@@ -401,7 +401,7 @@ async def update_admin_counter(context, count=None):
     if not ADMIN_ID:
         return
     count = eligible_user_count() if count is None else int(count)
-    text = f"👥 {count}/100 usuarios registrados"
+    text = f"Cantidad usuarios: {count} Registrados"
     message_id = _get_setting("admin_counter_message_id")
     if message_id:
         try:
@@ -422,7 +422,7 @@ async def update_admin_counter(context, count=None):
 async def update_user_counters(context, count=None):
     """Mantiene una única línea informativa, no interactiva, en el chat de cada participante elegible."""
     count = eligible_user_count() if count is None else int(count)
-    counter_text = f"👥 {count}/100 usuarios registrados"
+    counter_text = f"Cantidad usuarios: {count} Registrados"
     with db() as con:
         user_ids = [int(row[0]) for row in con.execute(
             "SELECT user_id FROM bot_users WHERE channel_member=1 ORDER BY joined_at"
