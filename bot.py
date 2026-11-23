@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 22
+Bot de rifas Telegram - versión 23
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -397,76 +397,18 @@ def _set_setting(key, value):
 
 
 def admin_user_count_keyboard(count):
-    """Botón pequeño y redondeado que muestra solamente la cantidad."""
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(str(int(count)), callback_data="admin:count")
-    ]])
+    """Teclado persistente con el contador integrado en una opción del panel."""
+    return InlineKeyboardMarkup([])
 
 
 async def update_admin_counter(context, count=None):
-    """Crea una línea visible y actualiza el botón numérico sin enviar mensajes repetidos."""
-    if not ADMIN_ID:
-        return
-
-    count = eligible_user_count() if count is None else int(count)
-    keyboard = admin_user_count_keyboard(count)
-
-    # Se usa una clave nueva para abandonar el mensaje invisible de versiones anteriores.
-    message_id = _get_setting("admin_counter_message_id_v2")
-    if message_id:
-        try:
-            await context.bot.edit_message_reply_markup(
-                chat_id=ADMIN_ID,
-                message_id=int(message_id),
-                reply_markup=keyboard
-            )
-            return
-        except Exception as exc:
-            if "message is not modified" in str(exc).lower():
-                return
-            log.info("Se recreará el contador visible del administrador: %s", exc)
-
-    try:
-        sent = await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text="👥 Usuarios registrados",
-            reply_markup=keyboard
-        )
-        _set_setting("admin_counter_message_id_v2", sent.message_id)
-    except Exception:
-        log.exception("No se pudo crear/actualizar el contador visible del administrador")
+    """No crea mensajes sueltos: el contador se integra en el teclado del panel."""
+    return
 
 
 async def update_user_counters(context, count=None):
-    """Mantiene el contador visible en el chat privado de cada participante, junto al teclado del panel."""
-    count = eligible_user_count() if count is None else int(count)
-    counter_text = f"Cantidad usuarios: {count} Registrados"
-    with db() as con:
-        user_ids = [int(row[0]) for row in con.execute(
-            "SELECT user_id FROM bot_users WHERE channel_member=1 ORDER BY joined_at"
-        ).fetchall()]
-    for user_id in user_ids:
-        if ADMIN_ID and user_id == int(ADMIN_ID):
-            continue
-        key = f"user_counter_message_id:{user_id}"
-        message_id = _get_setting(key)
-        if message_id:
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=user_id, message_id=int(message_id), text=counter_text
-                )
-                continue
-            except Exception as exc:
-                # Si el mensaje fue borrado o ya no puede editarse, se crea uno nuevo.
-                log.debug("Se renovará el contador del usuario %s: %s", user_id, exc)
-        try:
-            sent = await context.bot.send_message(
-                chat_id=user_id, text=counter_text, reply_markup=user_keyboard()
-            )
-            _set_setting(key, sent.message_id)
-        except Exception:
-            log.debug("No se pudo enviar/actualizar el contador al usuario %s", user_id, exc_info=True)
-        await asyncio.sleep(0.03)
+    """No crea mensajes sueltos: el contador se integra en el teclado persistente del usuario."""
+    return
 
 
 async def broadcast_unlocked_lists(context, raffle_names):
@@ -653,9 +595,11 @@ async def require_channel(update, context):
 
 
 def user_keyboard():
-    """Panel fijo de opciones; el contador se informa en mensajes, nunca como botón."""
+    """Panel fijo de opciones con contador integrado en el propio teclado."""
+    count = eligible_user_count()
     return ReplyKeyboardMarkup(
         [
+            [KeyboardButton(f"👥 Usuarios Registrados ({count})")],
             [KeyboardButton("🎟️ Ver listas activas"), KeyboardButton("🎟️ Mis jugadas")],
             [KeyboardButton("💳 Historial de pagos"), KeyboardButton("🏆 Mis premios")],
             [KeyboardButton("📚 Resultados y ganadores"), KeyboardButton("🆘 Ayuda / soporte")],
@@ -739,9 +683,11 @@ def build_user_stats(uid, action):
 
 
 def admin_keyboard():
-    """Teclado persistente del administrador; sin botones decorativos de contador."""
+    """Teclado persistente del administrador con el contador integrado."""
+    count = eligible_user_count()
     return ReplyKeyboardMarkup(
         [
+            [KeyboardButton(f"👥 Usuarios Registrados ({count})")],
             [KeyboardButton("➕ Crear lista"), KeyboardButton("📋 Listas activas")],
             [KeyboardButton("📊 Estadísticas"), KeyboardButton("🏆 Indicar Número Ganador")],
             [KeyboardButton("🔄 Resetear lista"), KeyboardButton("🗑️ Borrar lista")],
@@ -1544,10 +1490,23 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Panel fijo: solo responde en el chat privado y al administrador autorizado.
     if update.effective_chat.type == "private" and is_admin(update.effective_user.id):
+        if text.startswith("👥 Usuarios Registrados ("):
+            await msg.reply_text(
+                f"👥 Usuarios Registrados: {eligible_user_count()}",
+                reply_markup=admin_keyboard()
+            )
+            return
         action = ADMIN_MENU_ACTIONS.get(text)
         if action:
             await admin_menu_action(update, context, action)
             return
+
+    if text.startswith("👥 Usuarios Registrados ("):
+        await msg.reply_text(
+            f"👥 Usuarios Registrados: {eligible_user_count()}",
+            reply_markup=user_keyboard()
+        )
+        return
 
     if await process_admin_flow(update, context):
         return
