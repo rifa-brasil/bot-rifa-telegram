@@ -75,25 +75,6 @@ TELETHON_SESSION = os.getenv("TELETHON_SESSION", "")
 
 user_client = None
 db_lock = asyncio.Lock()
-web_runner = None
-
-
-async def start_web_server():
-    """Inicia un endpoint HTTP sencillo para el health check de Render."""
-    global web_runner
-
-    async def health(_request):
-        return web.json_response({"status": "ok", "service": "telegram-raffle-bot"})
-
-    web_app = web.Application()
-    web_app.router.add_get("/", health)
-    web_app.router.add_get("/health", health)
-
-    web_runner = web.AppRunner(web_app)
-    await web_runner.setup()
-    site = web.TCPSite(web_runner, "0.0.0.0", PORT)
-    await site.start()
-    log.info("Servidor web de salud activo en 0.0.0.0:%s", PORT)
 
 
 def now_utc():
@@ -2998,6 +2979,98 @@ async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
 
 
+async def refresh_raffle_progress_messages(context, raffle_id):
+    """Actualiza los mensajes de disponibilidad que cada usuario abrió para esta lista."""
+    with db() as con:
+        targets = con.execute("SELECT user_id,chat_id,message_id FROM raffle_progress_messages WHERE raffle_id=?", (raffle_id,)).fetchall()
+    body = list_text(raffle_id)
+    for target in targets:
+        try:
+            await context.bot.edit_message_text(chat_id=target['chat_id'], message_id=target['message_id'],
+                                                text=body, parse_mode='Markdown')
+        except Exception:
+            log.debug("No se pudo actualizar progreso para usuario %s", target['user_id'], exc_info=True)
+
+def list_text(raffle_id):
+    with db() as con:
+        r = con.execute("SELECT * FROM raffles WHERE id=?", (raffle_id,)).fetchone()
+        rows = con.execute(
+            "SELECT * FROM numbers WHERE raffle_id=? ORDER BY number", (raffle_id,)
+        ).fetchall()
+    if not r:
+        return "No existe esa rifa."
+    s = stats(raffle_id)
+    lines = [
+        f"🎟️ *{r['name']}* (Lista #{raffle_id})",
+        f"💵 Valor por número: *{float(r['price']):.2f} {CURRENCY}*",
+        f"🏆 Premio: *{r['prize'] or 'Premio entregado mediante transferencia PIX'}*",
+        f"💎 Valor del premio: *{r['prize_value'] or 'Por definir'}*",
+        f"🔢 Cantidad de números: *{r['total_numbers']}*",
+        ""
+    ]
+    for row in rows:
+        n = int(row["number"])
+        tag = f"{n:02d}" if r["total_numbers"] <= 100 else str(n)
+        if row["status"] == "available":
+            lines.append(f"🟢 *{tag}*: Disponible")
+        elif row["status"] == "pending":
+            lines.append(f"🟡 *{tag}*: En verificación")
+        else:
+            name = row["name"] or "Participante"
+            uid = row["user_id"]
+            mention = f"[{name}](tg://user?id={uid})" if uid else name
+            lines.append(f"🔴 *{tag}*: {mention}")
+    lines += [
+        "", f"📊 Progreso: `{progress_bar(s['occupied'] + s['pending'], s['total'])}` *{s['occupied'] + s['pending']}/{s['total']}* (ocupados + pendientes)",
+        f"🟢 Disponibles: *{s['available']}* | 🟡 Pendientes: *{s['pending']}*",
+        f"💰 Recaudado (pagos aprobados): *{s['revenue']:.2f} {CURRENCY}*",
+        f"Estado: *{s['status']}*"
+    ]
+    return "\n".join(lines)
+
+ADMIN_MENU_ACTIONS = {
+    "➕ Crear lista": "create",
+    "📋 Listas activas": "active",
+    "📊 Estadísticas": "stats",
+    "🏆 Indicar Número Ganador": "winner",
+    "🔄 Resetear lista": "reset",
+    "🗑️ Borrar lista": "delete",
+    "💾 Crear respaldo": "backup",
+    "♻️ Restaurar respaldo": "restore",
+    "👥 Historial": "history",
+    "👥 Usuarios actuales": "users",
+    "🔒 Bloquear jugadas": "block",
+    "🔓 Desbloquear jugadas": "unblock",
+    "🚫 Bloquear usuario": "block_user",
+    "✅ Desbloquear usuario": "unblock_user",
+    "🔄 Actualizar panel": "back",
+}
+
+def channel_join_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Unirme al canal", url=CHANNEL_JOIN_URL)],
+        [InlineKeyboardButton("✅ Ya me uní · Verificar", callback_data="channel:check")]
+    ])
+
+def eligible_user_count():
+    """Usuarios que iniciaron el bot y cuya membresía actual en el canal fue verificada."""
+    with db() as con:
+        return int(con.execute(
+            "SELECT COUNT(*) FROM bot_users WHERE channel_member=1"
+        ).fetchone()[0])
+
+async def start_web_server():
+    async def health(_request):
+        return web.Response(text="Bot de rifas activo")
+    app = web.Application()
+    app.router.add_get("/", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    log.info("Servidor web activo en puerto %s", PORT)
+
+
 async def main():
     if not BOT_TOKEN or not ADMIN_ID:
         raise RuntimeError("Configura TELEGRAM_TOKEN y ADMIN_TELEGRAM_ID en las variables de entorno.")
@@ -3079,8 +3152,6 @@ async def main():
         await app.shutdown()
         if user_client:
             await user_client.disconnect()
-        if web_runner:
-            await web_runner.cleanup()
 
 
 if __name__ == "__main__":
