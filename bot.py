@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 17
+Bot de rifas Telegram - versión 18
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -419,6 +419,36 @@ async def update_admin_counter(context, count=None):
         log.exception("No se pudo crear/actualizar el contador compacto del administrador")
 
 
+async def update_user_counters(context, count=None):
+    """Mantiene una única línea informativa, no interactiva, en el chat de cada participante elegible."""
+    count = eligible_user_count() if count is None else int(count)
+    counter_text = f"👥 {count}/100 usuarios registrados"
+    with db() as con:
+        user_ids = [int(row[0]) for row in con.execute(
+            "SELECT user_id FROM bot_users WHERE channel_member=1 ORDER BY joined_at"
+        ).fetchall()]
+    for user_id in user_ids:
+        if ADMIN_ID and user_id == int(ADMIN_ID):
+            continue
+        key = f"user_counter_message_id:{user_id}"
+        message_id = _get_setting(key)
+        if message_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=user_id, message_id=int(message_id), text=counter_text
+                )
+                continue
+            except Exception as exc:
+                # Si el mensaje fue borrado o ya no puede editarse, se crea uno nuevo.
+                log.debug("Se renovará el contador del usuario %s: %s", user_id, exc)
+        try:
+            sent = await context.bot.send_message(chat_id=user_id, text=counter_text)
+            _set_setting(key, sent.message_id)
+        except Exception:
+            log.debug("No se pudo enviar/actualizar el contador al usuario %s", user_id, exc_info=True)
+        await asyncio.sleep(0.03)
+
+
 async def broadcast_unlocked_lists(context, raffle_names):
     """Notifica a los participantes cuando el administrador habilita listas concretas."""
     names = list(dict.fromkeys(str(name) for name in raffle_names if name))
@@ -447,8 +477,9 @@ async def broadcast_unlocked_lists(context, raffle_names):
 
 
 async def notify_member_count(context, count):
-    """Actualiza el contador en tiempo real y avisa al admin una sola vez al llegar a 100."""
+    """Actualiza los contadores visibles y avisa al admin una sola vez al llegar a 100."""
     await update_admin_counter(context, count)
+    await update_user_counters(context, count)
     if count < 100:
         return
 
@@ -856,6 +887,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (user.id, user.full_name or user.first_name or "Participante", user.username or "", iso_now())
         )
     current_count = eligible_user_count()
+    await update_user_counters(context, current_count)
 
     if not existing or not was_member:
         await notify_member_count(context, current_count)
@@ -1758,6 +1790,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             after_count = eligible_user_count()
             if not known or not bool(known["channel_member"]):
                 await notify_member_count(context, after_count)
+            else:
+                await update_user_counters(context, after_count)
             await q.answer("¡Acceso confirmado!")
             await q.message.reply_text("✅ Ya tienes acceso. Usa el menú para ver las listas.", reply_markup=user_keyboard())
         elif reason == "config_missing":
@@ -3270,7 +3304,9 @@ async def main():
         # post_init no se ejecuta al usar initialize/start manualmente.
         await post_init(app)
         await sync_known_channel_members(app.bot)
-        await update_admin_counter(type("Context", (), {"bot": app.bot})())
+        startup_context = type("Context", (), {"bot": app.bot})()
+        await update_admin_counter(startup_context)
+        await update_user_counters(startup_context)
         if app.updater is None:
             raise RuntimeError("Application no tiene Updater; no se puede iniciar polling.")
         await app.updater.start_polling(
