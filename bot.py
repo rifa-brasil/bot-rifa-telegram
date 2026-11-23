@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 4
+Bot de rifas Telegram - versión 5
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -47,6 +47,8 @@ ADMIN_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
 DEFAULT_GROUP_ID = int(os.getenv("GROUP_CHAT_ID", "0"))
 CHANNEL_CHAT_ID = int(os.getenv("CHANNEL_CHAT_ID", "0"))  # ID numérico del canal
 CHANNEL_JOIN_URL = "https://t.me/+sRdEndX3bwszY2Ix"  # Enlace de acceso proporcionado
+# DB_PATH debe apuntar a un disco persistente del proveedor de hosting.
+# Si no se configura, se conserva el archivo local existente en el directorio de trabajo.
 DB_PATH = os.getenv("DB_PATH", "rifas.sqlite3")
 PORT = int(os.getenv("PORT", "10000"))
 RESERVATION_MINUTES = 5  # Primera ventana: 5 min para realizar el pago
@@ -256,9 +258,21 @@ def init_db():
                )""",
             (iso_now(),)
         )
+        # Impide nombres duplicados (ignorando mayúsculas/minúsculas y espacios externos).
+        # El trigger protege también frente a dos creaciones casi simultáneas.
+        con.executescript("""
+        CREATE TRIGGER IF NOT EXISTS prevent_duplicate_raffle_name_insert
+        BEFORE INSERT ON raffles
+        WHEN EXISTS (SELECT 1 FROM raffles WHERE lower(trim(name))=lower(trim(NEW.name)))
+        BEGIN SELECT RAISE(ABORT, 'duplicate_raffle_name'); END;
+        CREATE TRIGGER IF NOT EXISTS prevent_duplicate_raffle_name_update
+        BEFORE UPDATE OF name ON raffles
+        WHEN EXISTS (SELECT 1 FROM raffles WHERE id<>NEW.id AND lower(trim(name))=lower(trim(NEW.name)))
+        BEGIN SELECT RAISE(ABORT, 'duplicate_raffle_name'); END;
+        """)
         # El administrador controla manualmente si se aceptan nuevas jugadas.
         con.execute("INSERT OR IGNORE INTO bot_settings(setting_key,setting_value) VALUES('playing_enabled','0')")
-        # No crear rifas ficticias automáticamente: las listas se crean desde /admin.
+        # No se borran listas al arrancar: init_db solo crea/migra tablas y conserva los registros.
 
 
 def audit(action, details, admin_id=None):
@@ -689,12 +703,27 @@ def admin_back_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Volver al panel", callback_data="admin:back")]])
 
 
+def raffle_price_keyboard():
+    values = [10, 15, 20, 25, 30, 35, 40, 45, 50]
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"R$ {v}", callback_data=f"createprice:{v}") for v in values[i:i+3]]
+        for i in range(0, len(values), 3)
+    ])
+
+
+def raffle_percent_keyboard():
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("60%", callback_data="createpercent:60"),
+        InlineKeyboardButton("70%", callback_data="createpercent:70"),
+        InlineKeyboardButton("80%", callback_data="createpercent:80"),
+    ]])
+
+
 def admin_flow_prompt(step):
     prompts = {
-        "name": "Escribe el *nombre* de la nueva lista:",
-        "price": "¿Cuál será el *valor de cada número* en reales (R$)? Ejemplo: 15 o 15,50.",
-        "prize": "Describe el *premio* que se entregará:",
-        "prize_value": "¿Qué *porcentaje del total recaudado* será el premio? Escribe entre 70 y 80 (por ejemplo, 80). La lista tiene 100 números."
+        "name": "Escribe el *nombre único* de la nueva lista. No se permiten nombres repetidos:",
+        "price": "Selecciona el *valor de cada número* (R$).",
+        "percent": "Selecciona el *porcentaje de la recaudación* que se entregará como premio."
     }
     return prompts[step]
 
@@ -876,22 +905,23 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def new_raffle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Creación rápida: /nueva Nombre|precio_por_numero|premio|porcentaje"""
+    """Creación rápida: /nueva Nombre|precio_por_numero|porcentaje"""
     if not is_admin(update.effective_user.id):
         return
     raw = " ".join(context.args)
     parts = [x.strip() for x in raw.split("|")]
-    if len(parts) < 4:
+    if len(parts) != 3:
         await update.effective_message.reply_text(
-            "Uso: /nueva Nombre de lista|15|Descripción del premio|80%\n"
-            "El porcentaje del premio debe estar entre 70% y 80%. La lista se crea con 100 números."
+            "Uso: /nueva Nombre de lista|15|70\n"
+            "Precios permitidos: 10, 15, 20, 25, 30, 35, 40, 45 o 50. "
+            "Porcentajes permitidos: 60, 70 u 80."
         )
         return
     try:
-        name, price_text, prize, percent_text = parts[:4]
+        name, price_text, percent_text = parts
         price = Decimal(price_text.replace(",", "."))
         percent = Decimal(percent_text.replace("%", "").replace(",", "."))
-        if not name or price < 0 or not Decimal("70") <= percent <= Decimal("80"):
+        if not name or len(name) > 100 or price not in {Decimal(x) for x in (10,15,20,25,30,35,40,45,50)} or percent not in {Decimal(60),Decimal(70),Decimal(80)}:
             raise ValueError()
         amount = (price * Decimal("100") * percent / Decimal("100")).quantize(Decimal("0.01"))
         amount_fmt = f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -900,24 +930,27 @@ async def new_raffle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if group == 0:
             await update.effective_message.reply_text("El ID del grupo configurado (GROUP_CHAT_ID) es 0. Configúralo en el entorno del bot.")
             return
-    except (ValueError, InvalidOperation):
-        await update.effective_message.reply_text("Datos inválidos. Revisa el precio y el porcentaje del premio (70% a 80%).")
+        with db() as con:
+            if con.execute("SELECT 1 FROM raffles WHERE lower(trim(name))=lower(trim(?))", (name,)).fetchone():
+                await update.effective_message.reply_text("⛔ Ya existe una lista con ese nombre. Escribe un nombre diferente.")
+                return
+            cur = con.execute(
+                """INSERT INTO raffles(name,group_id,total_numbers,price,prize,prize_value,status,created_at)
+                   VALUES(?,?,100,?,'Premio en efectivo',?, 'active',?)""",
+                (name, group, float(price), prize_value, iso_now())
+            )
+            rid = cur.lastrowid
+            con.executemany(
+                "INSERT INTO numbers(raffle_id,number,status,updated_at) VALUES(?,?,?,?)",
+                [(rid, n, "available", iso_now()) for n in range(1, 101)]
+            )
+    except (ValueError, InvalidOperation, sqlite3.IntegrityError):
+        await update.effective_message.reply_text("Datos inválidos o nombre repetido. Comprueba las opciones y vuelve a intentarlo.")
         return
-    with db() as con:
-        cur = con.execute(
-            """INSERT INTO raffles(name,group_id,total_numbers,price,prize,prize_value,status,created_at)
-               VALUES(?,?,100,?,?,?,'active',?)""",
-            (name, group, float(price), prize, prize_value, iso_now())
-        )
-        rid = cur.lastrowid
-        con.executemany(
-            "INSERT INTO numbers(raffle_id,number,status,updated_at) VALUES(?,?,?,?)",
-            [(rid, n, "available", iso_now()) for n in range(1, 101)]
-        )
     audit("new_raffle", f"Rifa #{rid}: {name}", update.effective_user.id)
     await update.effective_message.reply_text(
-        f"✅ Lista #{rid} creada: {name} (100 números, del 1 al 100).\n"
-        f"Precio por número: R$ {float(price):.2f}\nPremio calculado: {prize_value}"
+        f"✅ Lista #{rid} creada: {name} (100 números).\n"
+        f"Precio por número: R$ {float(price):.2f}\nPorcentaje del premio: {percent}%\nPremio calculado: {prize_value}"
     )
 
 
@@ -1006,57 +1039,20 @@ async def process_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if not value or len(value) > 100:
                 await msg.reply_text("Escribe un nombre válido (máximo 100 caracteres).")
                 return True
+            with db() as con:
+                duplicate = con.execute("SELECT 1 FROM raffles WHERE lower(trim(name))=lower(trim(?))", (value,)).fetchone()
+            if duplicate:
+                await msg.reply_text("⛔ Ese nombre ya está utilizado. Escribe otro nombre para la lista:")
+                return True
             flow["name"] = value
             flow["total"] = 100
             flow["group"] = DEFAULT_GROUP_ID
             flow["step"] = "price"
-        elif step == "price":
-            price = float(Decimal(value.replace(",", ".")))
-            if price < 0:
-                raise ValueError()
-            flow["price"] = price
-            flow["step"] = "prize"
-        elif step == "prize":
-            if not value:
-                raise ValueError()
-            flow["prize"] = value
-            flow["step"] = "prize_value"
-        elif step == "prize_value":
-            if not value:
-                raise ValueError()
-            percent_text = value.strip().replace("%", "").replace(",", ".")
-            percent = Decimal(percent_text)
-            if not Decimal("70") <= percent <= Decimal("80"):
-                raise ValueError()
-            prize_amount = Decimal(str(flow["price"])) * Decimal("100") * percent / Decimal("100")
-            prize_amount = prize_amount.quantize(Decimal("0.01"))
-            # Formato monetario brasileño: punto de miles y coma decimal.
-            amount_fmt = f"{prize_amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            flow["prize_percent"] = percent
-            flow["prize_value"] = f"R$ {amount_fmt} ({percent}% do total)"
-            group = DEFAULT_GROUP_ID
-            if group == 0:
-                await msg.reply_text("El ID del grupo configurado (GROUP_CHAT_ID) es 0. Configúralo en el entorno del bot.")
-                return True
-            with db() as con:
-                cur = con.execute(
-                    """INSERT INTO raffles(name,group_id,total_numbers,price,prize,prize_value,status,created_at)
-                       VALUES(?,?,?,?,?,?,'active',?)""",
-                    (flow["name"], group, flow["total"], flow["price"], flow["prize"], flow["prize_value"], iso_now())
-                )
-                rid = cur.lastrowid
-                con.executemany(
-                    "INSERT INTO numbers(raffle_id,number,status,updated_at) VALUES(?,?,?,?)",
-                    [(rid, n, "available", iso_now()) for n in range(1, flow["total"] + 1)]
-                )
-            audit("new_raffle", f"Rifa #{rid}: {flow['name']}", update.effective_user.id)
-            context.user_data.pop("admin_flow", None)
-            await msg.reply_text(
-                f"✅ *Lista creada correctamente*\n\nID: *#{rid}*\nNombre: *{flow['name']}*\n"
-                f"Números: *{flow['total']}*\nValor por número: *{flow['price']:.2f} {CURRENCY}*\n"
-                f"Premio: *{flow['prize']}*\nValor del premio calculado: *{flow['prize_value']}*",
-                parse_mode="Markdown", reply_markup=admin_keyboard()
-            )
+            await msg.reply_text(admin_flow_prompt("price"), parse_mode="Markdown", reply_markup=raffle_price_keyboard())
+            return True
+        elif step in {"price", "percent"}:
+            await msg.reply_text("Por favor, selecciona una de las opciones que aparecen en los botones.",
+                                 reply_markup=raffle_price_keyboard() if step == "price" else raffle_percent_keyboard())
             return True
         elif step == "winner_raffle":
             raffle_id = int(value)
@@ -1117,6 +1113,17 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
     if action == "users":
         await msg.reply_text("👥 ESTADO DE PARTICIPANTES\n\n" + play_status_text(), reply_markup=admin_keyboard())
+        return
+    if action == "back":
+        with db() as con:
+            total = con.execute("SELECT COUNT(*) FROM raffles").fetchone()[0]
+            active = con.execute("SELECT COUNT(*) FROM raffles WHERE status='active'").fetchone()[0]
+        await msg.reply_text(
+            f"🔄 Panel actualizado.\nListas guardadas: {total} · Listas activas: {active}\n"
+            f"Base de datos: {Path(DB_PATH).expanduser().resolve()}\n"
+            "La actualización del panel no reinicia ni borra las listas.",
+            reply_markup=admin_keyboard()
+        )
         return
     if action == "create":
         context.user_data["admin_flow"] = {"kind": "create", "step": "name"}
@@ -1481,6 +1488,65 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
     uid = q.from_user.id
+
+    if data.startswith("createprice:") or data.startswith("createpercent:"):
+        if not is_admin(uid) or q.message.chat.type != "private":
+            await q.answer("Solo el administrador puede crear listas.", show_alert=True)
+            return
+        flow = context.user_data.get("admin_flow") or {}
+        if flow.get("kind") != "create":
+            await q.answer("El formulario expiró. Inicia de nuevo desde Crear lista.", show_alert=True)
+            return
+        try:
+            if data.startswith("createprice:"):
+                price = Decimal(data.split(":", 1)[1])
+                if price not in {Decimal(x) for x in (10,15,20,25,30,35,40,45,50)} or flow.get("step") != "price":
+                    raise ValueError()
+                flow["price"] = float(price)
+                flow["step"] = "percent"
+                await q.answer("Precio seleccionado")
+                await q.edit_message_text(f"Valor por número seleccionado: R$ {price}\n\n{admin_flow_prompt('percent')}",
+                                          parse_mode="Markdown", reply_markup=raffle_percent_keyboard())
+                return
+            percent = Decimal(data.split(":", 1)[1])
+            if percent not in {Decimal(60), Decimal(70), Decimal(80)} or flow.get("step") != "percent":
+                raise ValueError()
+            group = DEFAULT_GROUP_ID
+            if group == 0:
+                await q.answer("Falta configurar GROUP_CHAT_ID.", show_alert=True)
+                return
+            amount = (Decimal(str(flow["price"])) * Decimal("100") * percent / Decimal("100")).quantize(Decimal("0.01"))
+            amount_fmt = f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            prize_value = f"R$ {amount_fmt} ({percent}% do total)"
+            with db() as con:
+                if con.execute("SELECT 1 FROM raffles WHERE lower(trim(name))=lower(trim(?))", (flow["name"],)).fetchone():
+                    await q.answer("Ese nombre ya fue utilizado. Inicia otra lista con un nombre diferente.", show_alert=True)
+                    context.user_data.pop("admin_flow", None)
+                    return
+                cur = con.execute(
+                    """INSERT INTO raffles(name,group_id,total_numbers,price,prize,prize_value,status,created_at)
+                       VALUES(?,?,100,?,'Premio en efectivo',?,'active',?)""",
+                    (flow["name"], group, flow["price"], prize_value, iso_now())
+                )
+                rid = cur.lastrowid
+                con.executemany(
+                    "INSERT INTO numbers(raffle_id,number,status,updated_at) VALUES(?,?,?,?)",
+                    [(rid, n, "available", iso_now()) for n in range(1, 101)]
+                )
+            audit("new_raffle", f"Rifa #{rid}: {flow['name']}", uid)
+            context.user_data.pop("admin_flow", None)
+            await q.answer("Lista creada correctamente")
+            await q.edit_message_text(
+                f"✅ *Lista creada correctamente*\n\nID: *#{rid}*\nNombre: *{flow['name']}*\n"
+                f"Números: *100*\nValor por número: *R$ {flow['price']:.2f}*\n"
+                f"Porcentaje del premio: *{percent}%*\nPremio calculado: *{prize_value}*",
+                parse_mode="Markdown"
+            )
+            await q.message.reply_text("Panel de administración actualizado.", reply_markup=admin_keyboard())
+            return
+        except (ValueError, InvalidOperation, sqlite3.IntegrityError):
+            await q.answer("Opción no válida o nombre repetido. Vuelve a iniciar la creación.", show_alert=True)
+            return
 
     if data == "channel:check":
         allowed, reason = await channel_access_status(context.bot, uid)
@@ -2700,6 +2766,7 @@ async def main():
     if not BOT_TOKEN or not ADMIN_ID:
         raise RuntimeError("Configura TELEGRAM_TOKEN y ADMIN_TELEGRAM_ID en las variables de entorno.")
     init_db()
+    log.info("Base SQLite activa: %s", Path(DB_PATH).expanduser().resolve())
     if not CHANNEL_CHAT_ID:
         log.warning("CHANNEL_CHAT_ID no configurado: publicaciones públicas de jugadas/ganador/comprobante desactivadas.")
     await start_web_server()
