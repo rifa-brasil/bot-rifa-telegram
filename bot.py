@@ -545,10 +545,9 @@ async def require_channel(update, context):
 
 
 def user_keyboard():
-    """Panel fijo: arriba muestra el total general de usuarios registrados."""
+    """Panel fijo de opciones; el contador se informa en mensajes, nunca como botón."""
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(participant_progress_label())],
             [KeyboardButton("🎟️ Ver listas activas"), KeyboardButton("🎟️ Mis jugadas")],
             [KeyboardButton("💳 Historial de pagos"), KeyboardButton("🏆 Mis premios")],
             [KeyboardButton("📚 Resultados y ganadores"), KeyboardButton("🆘 Ayuda / soporte")],
@@ -632,10 +631,9 @@ def build_user_stats(uid, action):
 
 
 def admin_keyboard():
-    """Teclado persistente del administrador con el total general de usuarios."""
+    """Teclado persistente del administrador; sin botones decorativos de contador."""
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(participant_progress_label())],
             [KeyboardButton("➕ Crear lista"), KeyboardButton("📋 Listas activas")],
             [KeyboardButton("📊 Estadísticas"), KeyboardButton("🏆 Indicar Número Ganador")],
             [KeyboardButton("🔄 Resetear lista"), KeyboardButton("🗑️ Borrar lista")],
@@ -795,7 +793,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• *Mientras los 100 números de una lista no estén ocupados y los pagos confirmados, no existe resultado ganador para esa lista.* No se anuncia ni se determina un ganador antes de completar esas condiciones.\n"
             "• Una vez completada la lista, el sorteo se basa en el resultado nocturno de *Florida Pick 3*. Si se completa antes de las 21:00 (hora de Florida), se utiliza el sorteo nocturno de ese día; si se completa después, se utiliza el de la noche siguiente.\n\n"
             "🏆 *Premio*\n"
-            "El premio anunciado para cada lista corresponde al 70%–80% de la recaudación total, según el porcentaje definido para esa lista. Ejemplo: 100 números a R$ 10 generan R$ 1.000 y un premio de R$ 700 a R$ 800, según las condiciones publicadas.\n\n"
+            "El premio anunciado para cada lista corresponde al porcentaje configurado (60%, 65%, 70%, 75% u 80%) de la recaudación total, según el porcentaje definido para esa lista. Ejemplo: 100 números a R$ 10 generan R$ 1.000 y un premio de R$ 700 a R$ 800, según las condiciones publicadas.\n\n"
             "🔎 *Verificación del resultado*\n"
             "En el menú fijo encontrarás el botón para descargar la aplicación y consultar Florida Pick 3.\n\n"
             f"👥 *Participantes actuales:* {current_count} usuarios registrados en el bot y miembros del canal. El mínimo de referencia es 100; el administrador habilita o bloquea las jugadas manualmente.\n\n"
@@ -809,6 +807,9 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     await update.effective_message.reply_text(
         welcome, parse_mode="Markdown"
+    )
+    await update.effective_message.reply_text(
+        f"📊 PARTICIPANTES\n{participant_progress_label()}",
     )
     await update.effective_message.reply_text(
         "👇 *PANEL PRINCIPAL*\nCada botón muestra directamente su información:",
@@ -857,6 +858,9 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         await update.effective_message.reply_text("Por seguridad, abre el chat privado del bot y escribe /admin.")
         return
+    await update.effective_message.reply_text(
+        f"📊 INFORMACIÓN DE PARTICIPANTES\n{participant_progress_label()}\nEstado general: {'JUGADAS HABILITADAS' if is_playing_enabled() else 'JUGADAS BLOQUEADAS'}"
+    )
     await update.effective_message.reply_text(
         "⚙️ PANEL DE ADMINISTRACIÓN\nSelecciona una operación. Los botones permanecerán visibles aquí:",
         reply_markup=admin_keyboard()
@@ -1096,43 +1100,30 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     if action != "create":
         context.user_data.pop("admin_flow", None)
-    if action == "block":
-        set_playing_enabled(False)
-        await msg.reply_text("🔒 Las jugadas quedaron BLOQUEADAS para todos los participantes. El administrador puede volver a habilitarlas desde este panel.\n\n" + play_status_text(), reply_markup=admin_keyboard())
-        audit("playing_blocked", "El administrador bloqueó nuevas jugadas globalmente", update.effective_user.id)
-        return
-    if action == "unblock":
-        count = eligible_user_count()
-        set_playing_enabled(True)
-        threshold_text = (
-            "✅ Ya se alcanzó el mínimo de 100 usuarios registrados."
-            if count >= 100 else
-            f"⚠️ Actualmente hay {count} usuarios registrados; todavía no se alcanzó el mínimo de 100."
+    if action in {"block", "unblock"}:
+        target_status = "active" if action == "block" else "blocked"
+        verb = "bloquear" if action == "block" else "desbloquear"
+        with db() as con:
+            rows = [dict(r) for r in con.execute(
+                "SELECT id,name,status FROM raffles WHERE status=? ORDER BY id", (target_status,)
+            ).fetchall()]
+        if not rows:
+            await msg.reply_text(
+                "No hay listas disponibles para " + verb + ".",
+                reply_markup=admin_keyboard()
+            )
+            return
+        prefix = "raffleblock" if action == "block" else "raffleunblock"
+        icon = "🔒" if action == "block" else "🔓"
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton(f"{icon} {r['name']} (#{r['id']})", callback_data=f"{prefix}:{r['id']}")] for r in rows]
+            + [[InlineKeyboardButton(f"{icon} Todas las listas", callback_data=f"{prefix}:all")],
+               [InlineKeyboardButton("⬅️ Cancelar", callback_data="admin:back")]]
         )
         await msg.reply_text(
-            f"🔓 ¡Jugadas DESBLOQUEADAS por el administrador!\n{threshold_text}\n\n" + play_status_text(),
-            reply_markup=admin_keyboard()
+            f"Selecciona la lista que deseas {verb}. También puedes elegir «Todas las listas».",
+            reply_markup=keyboard
         )
-        with db() as con:
-            ids = [int(r[0]) for r in con.execute("SELECT user_id FROM bot_users WHERE channel_member=1 AND playing_blocked=0").fetchall()]
-        for user_id in ids:
-            try:
-                if count >= 100:
-                    user_notice = (
-                        "🎉 ¡YA HAY 100 USUARIOS MÍNIMOS!\n\n"
-                        "✅ El administrador ya desbloqueó las jugadas. Ya puedes entrar en «Ver listas activas» "
-                        "y escoger tus números, salvo que tengas un bloqueo individual."
-                    )
-                else:
-                    user_notice = (
-                        f"🔓 El administrador desbloqueó las jugadas. Actualmente hay {count} usuarios registrados; "
-                        "el mínimo de 100 todavía no se alcanzó. Puedes participar mientras las jugadas estén habilitadas, "
-                        "salvo que tengas un bloqueo individual."
-                    )
-                await context.bot.send_message(user_id, user_notice, reply_markup=user_keyboard())
-            except Exception:
-                pass
-        audit("playing_unblocked", f"Jugadas habilitadas con {count} usuarios elegibles", update.effective_user.id)
         return
     if action in {"block_user", "unblock_user"}:
         context.user_data["awaiting_user_play_control"] = "block" if action == "block_user" else "unblock"
@@ -1144,7 +1135,7 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         )
         return
     if action == "users":
-        await msg.reply_text("👥 ESTADO DE PARTICIPANTES\n\n" + play_status_text(), reply_markup=admin_keyboard())
+        await msg.reply_text("📊 BARRA INFORMATIVA\n" + participant_progress_label() + "\n\n👥 ESTADO DE PARTICIPANTES\n" + play_status_text(), reply_markup=admin_keyboard())
         return
     if action == "back":
         with db() as con:
@@ -2213,7 +2204,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raffle = get_raffle(req["raffle_id"])
         numbers_text = ", ".join(f"{n:02d}" for n in nums)
         if action == "ok":
-            result_text = f"✅ Solicitud {req_id} aprobada: {numbers_text}"
+            result_text = (f"✅ PAGO APROBADO · Solicitud {req_id}\n"
+                           f"🔢 Números: {numbers_text}\n"
+                           f"🎟️ Lista: {raffle['name']}\n"
+                           f"💰 Total pagado: {amount:.2f} {CURRENCY}")
             if q.message.photo:
                 await q.edit_message_caption(caption=result_text)
             else:
@@ -2224,10 +2218,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
                     except Exception:
                         log.info("No se pudo retirar un teclado antiguo de la solicitud %s", req_id)
+            approved_amount_text = f"{amount:.2f} {CURRENCY}"
             await context.bot.send_message(
                 req["origin_chat"],
-                f"✅ ¡PAGO APROBADO! Tu pago fue verificado. Números asignados: {numbers_text}. Tu jugada en «{raffle['name']}» está confirmada.",
-                parse_mode="Markdown"
+                (
+                    "🎉✨ <b>¡PAGO APROBADO!</b> ✨🎉\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    "✅ Tu pago fue verificado y tu participación está confirmada.\n\n"
+                    f"🔢 <b>NÚMEROS JUGADOS</b>\n<code>{html.escape(numbers_text)}</code>\n\n"
+                    f"🎟️ <b>LISTA</b>\n{html.escape(raffle['name'])}\n\n"
+                    f"💰 <b>TOTAL PAGADO</b>\n<b>{html.escape(approved_amount_text)}</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    "🍀 ¡Mucha suerte en el sorteo!"
+                ),
+                parse_mode="HTML"
             )
             if CHANNEL_CHAT_ID:
                 try:
@@ -2238,7 +2242,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                               f"📋 Lista: <b>{html.escape(raffle['name'])}</b>\n"
                               f"👤 Participante: <a href=\"tg://user?id={req['user_id']}\">{html.escape(public_name)}</a>\n"
                               f"🔢 Números confirmados: <b>{numbers_text}</b>\n"
-                              f"💵 Importe: <b>{float(req['total_amount'] or 0):.2f} {CURRENCY}</b>"),
+                              f"💵 Importe pagado: <b>{amount:.2f} {CURRENCY}</b>"),
                         parse_mode="HTML"
                     )
                 except Exception:
@@ -2274,6 +2278,45 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await refresh_raffle_progress_messages(context, req["raffle_id"])
             await refresh_user_progress_panels(context, req["raffle_id"])
         audit("payment_" + status, f"Solicitud {req_id}; números {numbers_text}", uid)
+        return
+
+    if data.startswith("raffleblock:") or data.startswith("raffleunblock:"):
+        if not is_admin(uid) or q.message.chat.type != "private":
+            await q.answer("Solo el administrador puede realizar esta acción.", show_alert=True)
+            return
+        block_action = data.startswith("raffleblock:")
+        new_status = "blocked" if block_action else "active"
+        old_status = "active" if block_action else "blocked"
+        selected = data.split(":", 1)[1]
+        with db() as con:
+            if selected == "all":
+                cur = con.execute("UPDATE raffles SET status=? WHERE status=?", (new_status, old_status))
+                changed = cur.rowcount
+                label = "todas las listas"
+            else:
+                try:
+                    raffle_id = int(selected)
+                except ValueError:
+                    await q.answer("Lista no válida.", show_alert=True)
+                    return
+                row = con.execute("SELECT name,status FROM raffles WHERE id=?", (raffle_id,)).fetchone()
+                if not row or row["status"] != old_status:
+                    await q.answer("La lista ya no está disponible para esta acción.", show_alert=True)
+                    return
+                con.execute("UPDATE raffles SET status=? WHERE id=?", (new_status, raffle_id))
+                changed = 1
+                label = f"{row['name']} (#{raffle_id})"
+        await q.answer("Listo")
+        if changed:
+            verb_done = "bloqueadas" if block_action else "desbloqueadas"
+            await q.message.reply_text(
+                f"{'🔒' if block_action else '🔓'} {label.capitalize()} {verb_done} correctamente.",
+                reply_markup=admin_keyboard()
+            )
+            audit("raffles_blocked" if block_action else "raffles_unblocked",
+                  f"{label}; cantidad={changed}", uid)
+        else:
+            await q.message.reply_text("No había listas que cambiar en esa selección.", reply_markup=admin_keyboard())
         return
 
     if data.startswith("admin:"):
