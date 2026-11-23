@@ -2844,31 +2844,22 @@ async def prize_receipt_photo_handler(update: Update, context: ContextTypes.DEFA
         return
     photo_file_id = message.photo[-1].file_id
     raffle = get_raffle(winner["raffle_id"])
+    prize_amount_text = format_brl(raffle_prize_amount(raffle))
     try:
         with db() as con:
             con.execute("UPDATE winners SET receipt_file_id=? WHERE id=?", (photo_file_id, winner["id"]))
+        # Publicación independiente: el resultado original permanece separado e intacto.
         public_caption = (
-            f"📸 <b>COMPROBANTE DE PREMIO</b>\n"
+            f"✅ <b>PREMIO RECIBIDO</b>\n\n"
             f"🎟️ Lista: <b>{html.escape(raffle['name'] if raffle else 'Rifa')}</b>\n"
             f"👤 Ganador: <a href=\"tg://user?id={winner['user_id']}\">{html.escape(winner['name'])}</a>\n"
-            "✅ El ganador envió la captura de la transferencia como comprobante."
+            f"🎯 Número ganador: <b>{int(winner['number']):02d}</b>\n"
+            f"💰 <b>Total del premio: {prize_amount_text}</b>\n\n"
+            "📸 El ganador confirmó la recepción y envió el comprobante."
         )
         await context.bot.send_photo(chat_id=CHANNEL_CHAT_ID, photo=photo_file_id, caption=public_caption, parse_mode="HTML")
         with db() as con:
             con.execute("UPDATE winners SET prize_received=1,receipt_pending=0,prize_status='completed',received_at=? WHERE id=?", (iso_now(), winner["id"]))
-        if winner["channel_message_id"]:
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=CHANNEL_CHAT_ID, message_id=winner["channel_message_id"],
-                    text=(f"🏆 <b>RESULTADO DE LA RIFA</b>\n\n"
-                          f"🎟️ Lista: <b>{html.escape(raffle['name'] if raffle else 'Rifa')}</b>\n"
-                          f"🎯 Número ganador: <b>{int(winner['number']):02d}</b>\n"
-                          f"👤 Ganador: <a href=\"tg://user?id={winner['user_id']}\">{html.escape(winner['name'])}</a>\n\n"
-                          "✅ <b>PREMIO RECIBIDO</b> — comprobante publicado."),
-                    parse_mode="HTML", reply_markup=None
-                )
-            except Exception:
-                log.exception("No se pudo actualizar el mensaje del ganador en el canal")
         await message.reply_text("✅ Captura recibida y publicada en el canal. Tu premio quedó marcado como recibido.")
         try:
             await context.bot.send_message(ADMIN_ID, f"🏁 Premio de {winner['name']} (lista #{winner['raffle_id']}, número {int(winner['number']):02d}) completado. La captura de recepción fue publicada en el canal.")
