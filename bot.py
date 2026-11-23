@@ -601,7 +601,7 @@ def build_user_stats(uid, action):
                 "SELECT w.*,r.name AS raffle_name,r.prize,r.prize_value FROM winners w JOIN raffles r ON r.id=w.raffle_id WHERE w.user_id=? ORDER BY w.id DESC LIMIT 30",
                 (uid,)
             ).fetchall()
-            blocks = [f"🏆 {r['raffle_name']} · Número: {int(r['number']):02d} · Premio: {r['prize'] or 'Premio entregado mediante transferencia PIX'} · {'Recibido' if r['prize_received'] else 'Pendiente de confirmar'}" for r in rows]
+            blocks = [f"🏆 {r['raffle_name']} · Número: {int(r['number']):02d}\n💰 Monto ganado: {format_brl(raffle_prize_amount(r))} · {'Recibido' if r['prize_received'] else 'Pendiente de confirmar'}" for r in rows]
             title = "🏆 *MIS PREMIOS*"
             empty = "Todavía no tienes premios registrados."
         elif action == "payments":
@@ -671,11 +671,11 @@ def raffle_name_keyboard():
 
 
 def raffle_percent_keyboard():
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("60%", callback_data="createpercent:60"),
-        InlineKeyboardButton("70%", callback_data="createpercent:70"),
-        InlineKeyboardButton("80%", callback_data="createpercent:80"),
-    ]])
+    values = (60, 65, 70, 75, 80)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{v}%", callback_data=f"createpercent:{v}") for v in values[i:i+3]]
+        for i in range(0, len(values), 3)
+    ])
 
 
 def admin_flow_prompt(step):
@@ -880,7 +880,7 @@ async def new_raffle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name, price_text, percent_text = parts
         price = Decimal(price_text.replace(",", "."))
         percent = Decimal(percent_text.replace("%", "").replace(",", "."))
-        if not name or len(name) > 100 or price not in {Decimal(x) for x in (10,15,20,25,30,35,40,45,50)} or percent not in {Decimal(60),Decimal(70),Decimal(80)}:
+        if not name or len(name) > 100 or price not in {Decimal(x) for x in (10,15,20,25,30,35,40,45,50)} or percent not in {Decimal(60),Decimal(65),Decimal(70),Decimal(75),Decimal(80)}:
             raise ValueError()
         amount = (price * Decimal("100") * percent / Decimal("100")).quantize(Decimal("0.01"))
         amount_fmt = f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -1651,7 +1651,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await q.message.reply_text(admin_flow_prompt("percent"), parse_mode="Markdown", reply_markup=raffle_percent_keyboard())
                 return
             percent = Decimal(data.split(":", 1)[1])
-            if percent not in {Decimal(60), Decimal(70), Decimal(80)} or flow.get("step") != "percent":
+            if percent not in {Decimal(60), Decimal(65), Decimal(70), Decimal(75), Decimal(80)} or flow.get("step") != "percent":
                 raise ValueError()
             group = DEFAULT_GROUP_ID
             if group == 0:
@@ -1942,7 +1942,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             body = "\n\n".join(blocks) if blocks else "Todavía no tienes jugadas registradas."
             title = "🎟️ *MIS JUGADAS*"
         elif action == "prizes":
-            blocks = [f"🏆 {r['raffle_name']} · Número: {int(r['number']):02d} · Premio: {r['prize'] or 'Premio entregado mediante transferencia PIX'} · {'Recibido' if r['prize_received'] else 'Pendiente de confirmar'}" for r in rows]
+            blocks = [f"🏆 {r['raffle_name']} · Número: {int(r['number']):02d}\n💰 Monto ganado: {format_brl(raffle_prize_amount(r))} · {'Recibido' if r['prize_received'] else 'Pendiente de confirmar'}" for r in rows]
             body = "\n\n".join(blocks) if blocks else "Todavía no tienes premios registrados."
             title = "🏆 *MIS PREMIOS*"
         elif action == "payments":
