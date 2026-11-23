@@ -913,6 +913,29 @@ async def new_raffle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def raffle_prize_amount(raffle):
+    """Calcula el premio en R$ según precio, cantidad de números y porcentaje de esta lista."""
+    if not raffle:
+        return Decimal("0.00")
+    raw_value = str(raffle.get("prize_value") or "") if hasattr(raffle, "get") else str(raffle["prize_value"] or "")
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*%", raw_value)
+    if match:
+        percent = Decimal(match.group(1).replace(",", "."))
+        price = Decimal(str(raffle["price"] or 0))
+        total_numbers = Decimal(str(raffle["total_numbers"] or 100))
+        return (price * total_numbers * percent / Decimal("100")).quantize(Decimal("0.01"))
+    # Compatibilidad con listas antiguas cuyo campo solo contiene el monto.
+    amount_match = re.search(r"(?:R\$\s*)?(\d[\d.]*,\d{2})", raw_value)
+    if amount_match:
+        return Decimal(amount_match.group(1).replace(".", "").replace(",", ".")).quantize(Decimal("0.01"))
+    return Decimal("0.00")
+
+
+def format_brl(value):
+    amount = Decimal(str(value)).quantize(Decimal("0.01"))
+    return f"R$ {amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
 def verify_winner_ownership(con, winner):
     """Revalida que el ganador conserva el número y que existe una compra aprobada."""
     number_row = con.execute(
@@ -939,6 +962,8 @@ async def publish_winner(update, context, raffle_id, number):
     if not raffle or not 1 <= number <= raffle["total_numbers"]:
         await update.effective_message.reply_text("Lista o número inválido.")
         return
+    prize_amount = raffle_prize_amount(raffle)
+    prize_amount_text = format_brl(prize_amount)
     with db() as con:
         row = con.execute(
             "SELECT * FROM numbers WHERE raffle_id=? AND number=? AND status='occupied'",
@@ -959,7 +984,8 @@ async def publish_winner(update, context, raffle_id, number):
     msg = (
         f"🎉 ¡FELICIDADES, {row['name']}! 🎉\n\n"
         f"🏆 Has sido el ganador del sorteo de la *{raffle['name']}*.\n"
-        f"🎯 Número ganador: *{number:02d}*.\n\n"
+        f"🎯 Número ganador: *{number:02d}*.\n"
+        f"💰 *Monto del premio: {prize_amount_text}*\n\n"
         "Para recibir tu premio, solicita la entrega al administrador pulsando el botón de abajo."
     )
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🎁 Solicitar Premio al Administrador", callback_data=f"prizerequest:{winner_id}")]])
@@ -978,7 +1004,8 @@ async def publish_winner(update, context, raffle_id, number):
                     f"🏆 <b>RESULTADO DE LA RIFA</b>\n\n"
                     f"🎟️ Lista: <b>{html.escape(raffle['name'])}</b>\n"
                     f"🎯 Número ganador: <b>{number:02d}</b>\n"
-                    f"👤 Usuario ganador: <a href=\"tg://user?id={row['user_id']}\">{html.escape(row['name'])}</a>\n\n"
+                    f"👤 Usuario ganador: <a href=\"tg://user?id={row['user_id']}\">{html.escape(row['name'])}</a>\n"
+                    f"💰 <b>Monto del premio: {prize_amount_text}</b>\n\n"
                     "El ganador recibirá las instrucciones para solicitar su premio por mensaje privado."
                 ), parse_mode="HTML"
             )
@@ -1241,6 +1268,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("La llave PIX no parece válida. Envíala nuevamente (máximo 200 caracteres).")
             return
         raffle = get_raffle(winner["raffle_id"])
+        prize_amount_text = format_brl(raffle_prize_amount(raffle))
         try:
             with db() as con:
                 con.execute("UPDATE winners SET pix_key=?,prize_status='pix_received' WHERE id=? AND user_id=? AND prize_status='pix_input_pending'",
@@ -1258,7 +1286,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                       f"Lista: <b>{html.escape(raffle['name'] if raffle else str(winner['raffle_id']))}</b>\n"
                       f"Ganador: <b>{html.escape(winner['name'])}</b>\n"
                       f"ID Telegram: <code>{winner['user_id']}</code>\n"
-                      f"Número ganador: <b>{int(winner['number']):02d}</b>\n\n"
+                      f"Número ganador: <b>{int(winner['number']):02d}</b>\n"
+                      f"Monto del premio: <b>{prize_amount_text}</b>\n\n"
                       f"Llave PIX: <code>{html.escape(pix_key)}</code>\n\n"
                       "Usa el botón para copiar la llave. Cuando completes la transferencia, pulsa «Premio enviado» y adjunta la captura."),
                 parse_mode="HTML", reply_markup=InlineKeyboardMarkup(copy_row)
@@ -2005,6 +2034,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             con.execute("UPDATE winners SET prize_status='requested' WHERE id=?", (winner_id,))
         raffle = get_raffle(winner["raffle_id"])
+        prize_amount_text = format_brl(raffle_prize_amount(raffle))
         admin_keyboard_prize = InlineKeyboardMarkup([[InlineKeyboardButton("🔑 Solicitar llave PIX al usuario", callback_data=f"prizepix:{winner_id}")]])
         try:
             await context.bot.send_message(
@@ -2013,7 +2043,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                       f"Lista: <b>{html.escape(raffle['name'] if raffle else str(winner['raffle_id']))}</b>\n"
                       f"Ganador: <b>{html.escape(winner['name'])}</b>\n"
                       f"ID Telegram: <code>{winner['user_id']}</code>\n"
-                      f"Número ganador: <b>{int(winner['number']):02d}</b>\n\n"
+                      f"Número ganador: <b>{int(winner['number']):02d}</b>\n"
+                      f"💰 <b>Monto del premio: {prize_amount_text}</b>\n\n"
                       "✅ El bot volvió a verificar la tabla de números y encontró una compra aprobada de este número a nombre del usuario solicitante."),
                 parse_mode="HTML", reply_markup=admin_keyboard_prize
             )
@@ -2041,9 +2072,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             con.execute("UPDATE winners SET prize_status='pix_requested' WHERE id=?", (winner_id,))
         raffle_for_pix = get_raffle(winner["raffle_id"])
+        prize_amount_text = format_brl(raffle_prize_amount(raffle_for_pix))
         await context.bot.send_message(
             winner["user_id"],
-            f"🔑 <b>NECESITAMOS TU LLAVE PIX</b>\n\nPara transferirte el premio de la <b>{html.escape(raffle_for_pix['name'] if raffle_for_pix else str(winner['raffle_id']))}</b>, envía tu llave PIX pulsando el botón de abajo.",
+            f"🔑 <b>NECESITAMOS TU LLAVE PIX</b>\n\nPara transferirte el premio de la <b>{html.escape(raffle_for_pix['name'] if raffle_for_pix else str(winner['raffle_id']))}</b>, por un monto de <b>{prize_amount_text}</b>, envía tu llave PIX pulsando el botón de abajo.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✍️ Responder: Enviar llave PIX", callback_data=f"winnerpixinput:{winner_id}")]])
         )
