@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 11
+Bot de rifas Telegram - versión 17
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
