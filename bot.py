@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión ampliada
+Bot de rifas Telegram - versión 3
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -98,7 +98,8 @@ def init_db():
             user_id INTEGER PRIMARY KEY,
             first_name TEXT DEFAULT '',
             username TEXT DEFAULT '',
-            joined_at TEXT NOT NULL
+            joined_at TEXT NOT NULL,
+            channel_member INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS raffles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -185,6 +186,10 @@ def init_db():
             created_at TEXT NOT NULL
         );
         """)
+        # Migración: registra si cada usuario conocido sigue en el canal.
+        bot_user_columns = {r[1] for r in con.execute("PRAGMA table_info(bot_users)")}
+        if "channel_member" not in bot_user_columns:
+            con.execute("ALTER TABLE bot_users ADD COLUMN channel_member INTEGER NOT NULL DEFAULT 0")
         # Migraciones para publicación en canal y comprobante de recepción del premio.
         winner_columns = {r[1] for r in con.execute("PRAGMA table_info(winners)")}
         for col, declaration in [
@@ -382,6 +387,81 @@ def channel_join_keyboard():
     ])
 
 
+def florida_links_keyboard():
+    """Accesos directos oficiales/de consulta de Florida Pick 3 en el chat privado."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎯 Consultar resultado Florida Pick 3", url=FLORIDA_PICK3_PDF)],
+        [InlineKeyboardButton("📲 Descargar Florida Lottery · Android", url=FLORIDA_PICK3_ANDROID_URL)],
+        [InlineKeyboardButton("🍎 Descargar Florida Lottery · iPhone", url=FLORIDA_PICK3_IOS_URL)],
+    ])
+
+
+def eligible_user_count():
+    """Usuarios que iniciaron el bot y cuya membresía actual en el canal fue verificada."""
+    with db() as con:
+        return int(con.execute(
+            "SELECT COUNT(*) FROM bot_users WHERE channel_member=1"
+        ).fetchone()[0])
+
+
+async def notify_user_ready(context, user_id, count):
+    try:
+        await context.bot.send_message(
+            chat_id=int(user_id),
+            text=(
+                "🎉 ¡YA PUEDES PARTICIPAR!\n\n"
+                f"La comunidad alcanzó {count} usuarios registrados en el bot y miembros del canal. "
+                "Desde ahora puedes abrir «Ver listas activas», consultar la disponibilidad y escoger "
+                "los números que desees. Recuerda: no hay resultado ganador hasta que los 100 números "
+                "de la lista estén ocupados y los pagos correspondientes confirmados."
+            ),
+            reply_markup=user_keyboard()
+        )
+        return True
+    except Exception:
+        log.info("No se pudo notificar por privado al usuario %s", user_id, exc_info=True)
+        return False
+
+
+async def notify_threshold_reached(context, count):
+    """Avisa a todos los usuarios registrados que siguen siendo miembros del canal."""
+    with db() as con:
+        user_ids = [int(r[0]) for r in con.execute(
+            "SELECT user_id FROM bot_users WHERE channel_member=1 ORDER BY joined_at"
+        ).fetchall()]
+    sent = 0
+    for user_id in user_ids:
+        if await notify_user_ready(context, user_id, count):
+            sent += 1
+        # Mantiene el envío por debajo del límite global habitual de Telegram.
+        await asyncio.sleep(0.05)
+    log.info("Aviso de umbral enviado a %s de %s usuarios elegibles", sent, len(user_ids))
+
+
+async def sync_known_channel_members(bot):
+    """Reconcilia el estado real de los usuarios ya registrados al iniciar el bot."""
+    if not CHANNEL_CHAT_ID:
+        return
+    before_count = eligible_user_count()
+    with db() as con:
+        user_ids = [int(r[0]) for r in con.execute("SELECT user_id FROM bot_users").fetchall()]
+    for user_id in user_ids:
+        try:
+            allowed, reason = await channel_access_status(bot, user_id)
+            if not str(reason).startswith("api_error:") and reason != "config_missing":
+                with db() as con:
+                    con.execute(
+                        "UPDATE bot_users SET channel_member=? WHERE user_id=?",
+                        (1 if allowed else 0, user_id)
+                    )
+        except Exception:
+            log.exception("No se pudo sincronizar membresía del usuario %s", user_id)
+    after_count = eligible_user_count()
+    if before_count < 100 <= after_count:
+        await notify_threshold_reached(type("Context", (), {"bot": bot})(), after_count)
+    log.info("Sincronización de canal terminada: %s usuarios elegibles", after_count)
+
+
 async def channel_access_status(bot, user_id):
     """Devuelve (acceso, motivo) para no confundir un fallo de API con falta de membresía."""
     if not CHANNEL_CHAT_ID:
@@ -424,7 +504,8 @@ async def channel_diagnostic_cmd(update: Update, context: ContextTypes.DEFAULT_T
             f"Canal detectado: {chat.title or 'sin título'}\n"
             f"ID configurado: {CHANNEL_CHAT_ID}\n"
             f"Estado del bot: {status}\n"
-            f"Bot administrador: {'sí' if bot_admin else 'NO'}\n\n"
+            f"Bot administrador: {'sí' if bot_admin else 'NO'}\n"
+            f"Usuarios elegibles (iniciaron el bot y siguen en el canal): {eligible_user_count()}/100\n\n"
             + ("✅ El bot ve el canal y tiene permisos de administrador." if bot_admin else
                "⚠️ Añade el bot como administrador del canal y vuelve a ejecutar /diagnostico_canal.")
         )
@@ -629,13 +710,23 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_channel(update, context):
         return
 
+    before_count = eligible_user_count()
     with db() as con:
-        existing = con.execute("SELECT user_id FROM bot_users WHERE user_id=?", (user.id,)).fetchone()
+        existing = con.execute(
+            "SELECT user_id,channel_member FROM bot_users WHERE user_id=?", (user.id,)
+        ).fetchone()
+        was_member = bool(existing and existing["channel_member"])
         con.execute(
-            "INSERT INTO bot_users(user_id,first_name,username,joined_at) VALUES(?,?,?,?) "
-            "ON CONFLICT(user_id) DO UPDATE SET first_name=excluded.first_name,username=excluded.username",
+            "INSERT INTO bot_users(user_id,first_name,username,joined_at,channel_member) VALUES(?,?,?,?,1) "
+            "ON CONFLICT(user_id) DO UPDATE SET first_name=excluded.first_name,username=excluded.username,channel_member=1",
             (user.id, user.full_name or user.first_name or "Participante", user.username or "", iso_now())
         )
+    current_count = eligible_user_count()
+
+    if before_count < 100 <= current_count:
+        await notify_threshold_reached(context, current_count)
+    elif current_count >= 100 and not was_member:
+        await notify_user_ready(context, user.id, current_count)
 
     if not existing:
         welcome = (
@@ -643,21 +734,31 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "ℹ️ *INFORMACIÓN DEL CANAL Y DE LAS RIFAS*\n"
             "Este canal informa sobre las listas de rifas, números confirmados, resultados y ganadores. Para elegir números y gestionar tus participaciones, utiliza los botones del chat privado del bot. La unión al canal es obligatoria para utilizar el bot.\n\n"
             "🎟️ *¿Cómo funciona?*\n"
-            "• Cada lista tiene 100 números, del 01 al 100. Puedes jugar uno o varios números.\n"
-            "• El precio por número puede ser diferente en cada lista. Por ejemplo, una lista puede costar R$ 10 por número, otra R$ 20 y otra R$ 25. Consulta las listas activas para confirmar el precio, el premio y los números disponibles de cada una.\n"
+            "• Cada lista tiene 100 números, del 01 al 100. Puedes elegir uno o varios números.\n"
+            "• El precio por número puede ser diferente en cada lista. Consulta cada lista para confirmar su precio, premio y disponibilidad.\n"
             "• Un número no puede reservarse o confirmarse para dos personas. Sigue las instrucciones de pago y espera la confirmación del bot.\n"
-            "• El sorteo se realiza cuando los 100 números de una lista estén ocupados y confirmados. El número ganador se determina usando el resultado nocturno de *Florida Pick 3*.\n"
-            "• Si la lista se completa antes de las 21:00 (hora de Florida), se utiliza el sorteo nocturno de ese mismo día. Si se completa después de las 21:00, se utiliza el sorteo nocturno del día siguiente.\n\n"
+            "• *Mientras los 100 números de una lista no estén ocupados y los pagos confirmados, no existe resultado ganador para esa lista.* No se anuncia ni se determina un ganador antes de completar esas condiciones.\n"
+            "• Una vez completada la lista, el sorteo se basa en el resultado nocturno de *Florida Pick 3*. Si se completa antes de las 21:00 (hora de Florida), se utiliza el sorteo nocturno de ese día; si se completa después, se utiliza el de la noche siguiente.\n\n"
             "🏆 *Premio*\n"
-            "El premio anunciado para cada lista corresponde al 70%–80% de la recaudación total, según el porcentaje definido para esa lista. Ejemplo: si hay 100 números a R$ 10, la recaudación es R$ 1.000 y el premio estimado será de R$ 700 a R$ 800, según las condiciones publicadas en esa lista. El tiempo para completar una lista puede variar; el sorteo y la entrega se anuncian cuando se cumplan las condiciones de la lista.\n\n"
+            "El premio anunciado para cada lista corresponde al 70%–80% de la recaudación total, según el porcentaje definido para esa lista. Ejemplo: 100 números a R$ 10 generan R$ 1.000 y un premio de R$ 700 a R$ 800, según las condiciones publicadas.\n\n"
             "🔎 *Verificación del resultado*\n"
-            "El resultado publicado por el bot debe poder contrastarse con el resultado oficial de Florida Lottery. En el canal se facilitará un enlace o aplicación oficial/de consulta para que puedas comprobarlo por tu cuenta.\n\n"
-            "📌 Usa *Ver listas activas* para revisar precios, premios y progreso. Los demás botones del menú te permiten consultar tus jugadas, pagos, premios y resultados, o contactar con soporte."
+            "Puedes consultar el resultado oficial de Florida Pick 3 o descargar la aplicación Florida Lottery con los accesos directos que aparecen debajo de este mensaje.\n\n"
+            f"👥 *Acceso a las jugadas:* actualmente hay {current_count}/100 usuarios registrados en el bot y miembros del canal. Puedes revisar el menú y las listas desde ahora, pero solo podrás reservar números cuando se alcance el mínimo de 100.\n\n"
+            "📌 Cada botón del menú principal abre directamente la consulta correspondiente, sin submenús."
         )
     else:
-        welcome = "¡Hola de nuevo! Usa los botones del panel para consultar listas, tus jugadas, pagos, premios, resultados y soporte."
-    await update.effective_message.reply_text(welcome, parse_mode="Markdown", reply_markup=user_keyboard())
-
+        welcome = (
+            f"¡Hola de nuevo! Actualmente hay {current_count}/100 usuarios registrados en el bot y miembros del canal. "
+            "Puedes revisar las listas y consultar tus datos. La reserva de números se habilita al alcanzar 100 usuarios. "
+            "Recuerda que no hay resultado ganador hasta que los 100 números de una lista estén ocupados y los pagos confirmados."
+        )
+    await update.effective_message.reply_text(
+        welcome, parse_mode="Markdown", reply_markup=florida_links_keyboard()
+    )
+    await update.effective_message.reply_text(
+        "👇 *PANEL PRINCIPAL*\nCada botón muestra directamente su información:",
+        parse_mode="Markdown", reply_markup=user_keyboard()
+    )
 
 async def diagnostic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Diagnóstico visible solo para el administrador del bot."""
@@ -1149,6 +1250,19 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not re.fullmatch(r"\d+(?:\s*,\s*\d+)*", text):
         return
 
+    if not is_admin(update.effective_user.id):
+        eligible = eligible_user_count()
+        if eligible < 100:
+            await msg.reply_text(
+                "🔒 *LAS JUGADAS AÚN NO ESTÁN HABILITADAS*\n\n"
+                f"Actualmente hay {eligible} de 100 usuarios registrados en el bot y miembros del canal.\n"
+                "Puedes consultar las listas, revisar los números y utilizar las demás opciones del menú, "
+                "pero no puedes reservar números ni iniciar una jugada hasta que se alcance el mínimo de 100. "
+                "Cuando se llegue a esa cantidad, el bot enviará una notificación automáticamente.",
+                parse_mode="Markdown", reply_markup=user_keyboard()
+            )
+            return
+
     group_id = DEFAULT_GROUP_ID
     selected_id = context.user_data.get("selected_raffle_id")
     raffle = get_raffle(selected_id) if selected_id else None
@@ -1270,6 +1384,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "channel:check":
         allowed, reason = await channel_access_status(context.bot, uid)
         if allowed:
+            before_count = eligible_user_count()
+            q_user = q.from_user
+            with db() as con:
+                known = con.execute("SELECT channel_member FROM bot_users WHERE user_id=?", (uid,)).fetchone()
+                con.execute(
+                    "INSERT INTO bot_users(user_id,first_name,username,joined_at,channel_member) VALUES(?,?,?,?,1) "
+                    "ON CONFLICT(user_id) DO UPDATE SET first_name=excluded.first_name,username=excluded.username,channel_member=1",
+                    (uid, q_user.full_name or q_user.first_name or "Participante", q_user.username or "", iso_now())
+                )
+            after_count = eligible_user_count()
+            if not known or not bool(known["channel_member"]):
+                if before_count < 100 <= after_count:
+                    await notify_threshold_reached(context, after_count)
+                elif after_count >= 100:
+                    await notify_user_ready(context, uid, after_count)
             await q.answer("¡Acceso confirmado!")
             await q.message.reply_text("✅ Ya tienes acceso. Usa el menú para ver las listas.", reply_markup=user_keyboard())
         elif reason == "config_missing":
@@ -1383,12 +1512,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         context.user_data["selected_raffle_id"] = raffle_id
         await q.answer("Lista seleccionada")
-        detail_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔢 Ver números disponibles", callback_data=f"available:{raffle_id}")],
-            [InlineKeyboardButton("📊 Actualizar progreso", callback_data=f"progress:{raffle_id}")]
-        ])
-        await q.message.reply_text(list_text(raffle_id), parse_mode="Markdown", reply_markup=detail_keyboard)
-        await q.message.reply_text("Menú principal", reply_markup=user_keyboard())
+        await q.message.reply_text(
+            list_text(raffle_id), parse_mode="Markdown", reply_markup=user_keyboard()
+        )
         return
 
     if data.startswith(("available:", "progress:")):
@@ -1415,7 +1541,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "\n".join(", ".join(f"{n:02d}" for n in chunk) for chunk in chunks))
             else:
                 body = f"🔒 No quedan números disponibles en «{raffle['name']}»."
-        await q.message.reply_text(body, parse_mode="Markdown")
+        # En esta versión los detalles de la lista se muestran juntos, sin botones anidados.
+        await q.message.reply_text(
+            list_text(raffle_id), parse_mode="Markdown", reply_markup=user_keyboard()
+        )
         return
 
     if data.startswith("userstats:"):
@@ -2346,40 +2475,65 @@ async def pick3_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def welcome_channel_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Da la bienvenida en el canal cuando se detecta una nueva membresía."""
+    """Actualiza miembros conocidos del canal y notifica al alcanzar 100 elegibles."""
     change = update.chat_member
     if not change or not change.chat or change.chat.id != CHANNEL_CHAT_ID:
         return
+    member = change.new_chat_member.user
+    if member.id == context.bot.id:
+        return
+
     old_status = change.old_chat_member.status
     new_status = change.new_chat_member.status
-    if new_status in {"member", "administrator", "creator"} and old_status in {"left", "kicked", "banned"}:
-        member = change.new_chat_member.user
-        if member.id == context.bot.id:
-            return
+    is_now_member = (
+        new_status in {"member", "administrator", "creator"}
+        or (new_status == "restricted" and getattr(change.new_chat_member, "is_member", False))
+    )
+    was_member = (
+        old_status in {"member", "administrator", "creator"}
+        or (old_status == "restricted" and getattr(change.old_chat_member, "is_member", False))
+    )
+
+    before_count = eligible_user_count()
+    with db() as con:
+        known = con.execute(
+            "SELECT channel_member FROM bot_users WHERE user_id=?", (member.id,)
+        ).fetchone()
+        if known:
+            con.execute(
+                "UPDATE bot_users SET channel_member=? WHERE user_id=?",
+                (1 if is_now_member else 0, member.id)
+            )
+    after_count = eligible_user_count()
+
+    if known and is_now_member and not bool(known["channel_member"]):
+        if before_count < 100 <= after_count:
+            await notify_threshold_reached(context, after_count)
+        elif after_count >= 100:
+            await notify_user_ready(context, member.id, after_count)
+    elif known and was_member and not is_now_member:
+        log.info("Usuario %s salió del canal; elegibles actuales: %s", member.id, after_count)
+
+    if is_now_member and not was_member:
         try:
             info_text = (
                 f"👋 ¡Bienvenido/a, {html.escape(member.first_name or 'participante')}!\n\n"
                 "ℹ️ INFORMACIÓN\n"
                 "Este canal comparte las listas de rifas, avances, jugadas confirmadas, resultados y ganadores. Para participar, abre el chat privado del bot y pulsa /start; la membresía en este canal es obligatoria para utilizar sus funciones.\n\n"
                 "🎟️ CÓMO FUNCIONAN LAS LISTAS\n"
-                "Cada lista tiene 100 números (01–100). Puedes elegir uno o varios números. El precio por número y el premio pueden cambiar de una lista a otra: por ejemplo, una lista puede costar R$ 10 por número, otra R$ 20 y otra R$ 25. Consulta cada lista antes de participar para ver su precio, premio y disponibilidad.\n\n"
+                "Cada lista tiene 100 números (01–100). Puedes elegir uno o varios números. El precio por número y el premio pueden cambiar de una lista a otra. Consulta cada lista antes de participar para ver su precio, premio y disponibilidad.\n\n"
                 "🏆 SORTEO Y PREMIO\n"
-                "Cuando los 100 números de una lista estén ocupados y confirmados, se utiliza el resultado nocturno de Florida Pick 3. Si se completa antes de las 21:00 (hora de Florida), se toma el sorteo de esa noche; si se completa después, se toma el de la noche siguiente. El premio será del 70% al 80% de la recaudación, según el porcentaje indicado en esa lista. Ejemplo: 100 números a R$ 10 generan R$ 1.000; el premio será de R$ 700 a R$ 800. La lista puede tardar unos 3 días o hasta una semana en completarse, dependiendo de la participación.\n\n"
+                "IMPORTANTE: mientras no estén ocupados los 100 números de una lista y confirmados los pagos correspondientes, no hay resultado ganador para esa lista. Solo cuando se complete se utiliza el resultado nocturno de Florida Pick 3. Si se completa antes de las 21:00 (hora de Florida), se toma el sorteo de esa noche; si se completa después, el de la noche siguiente. El premio será del 70% al 80% de la recaudación, según lo publicado en cada lista.\n\n"
                 "🔎 VERIFICACIÓN\n"
-                "Descarga la aplicación oficial Florida Lottery desde el botón correspondiente y compara el resultado con el que publique el bot. La referencia válida es el resultado oficial de Florida Lottery.\n\n"
-                "👇 Abre el bot y pulsa /start para comenzar."
+                "Consulta el resultado oficial de Florida Lottery mediante los accesos directos de abajo y compáralo con el resultado publicado por el bot.\n\n"
+                "👇 Abre el bot y pulsa /start. Para habilitar las jugadas se requieren 100 usuarios registrados en el bot y miembros del canal."
             )
-            channel_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📲 Descargar para Android", url=FLORIDA_PICK3_ANDROID_URL)],
-                [InlineKeyboardButton("🍎 Descargar para iPhone", url=FLORIDA_PICK3_IOS_URL)],
-            ])
             await context.bot.send_message(
-                chat_id=CHANNEL_CHAT_ID, text=info_text,
-                parse_mode="HTML", reply_markup=channel_markup
+                chat_id=CHANNEL_CHAT_ID, text=info_text, parse_mode="HTML",
+                reply_markup=florida_links_keyboard()
             )
         except Exception:
             log.exception("No se pudo publicar bienvenida al nuevo miembro del canal")
-
 
 async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """No anuncia jugadas en grupos; invita a los nuevos a usar el bot en privado."""
@@ -2451,6 +2605,7 @@ async def main():
         await app.start()
         # post_init no se ejecuta al usar initialize/start manualmente.
         await post_init(app)
+        await sync_known_channel_members(app.bot)
         if app.updater is None:
             raise RuntimeError("Application no tiene Updater; no se puede iniciar polling.")
         await app.updater.start_polling(
