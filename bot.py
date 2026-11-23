@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 26
+Bot de rifas Telegram - versión 27
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -2844,7 +2844,11 @@ async def send_json(update, context):
 async def send_history(update, context, raffle_id):
     """Muestra cada operación de la lista por separado, con acceso al usuario y reenvío."""
     with db() as con:
-        raffle = con.execute("SELECT id,name FROM raffles WHERE id=?", (raffle_id,)).fetchone()
+        raffle = con.execute("SELECT * FROM raffles WHERE id=?", (raffle_id,)).fetchone()
+        winners = con.execute(
+            "SELECT * FROM winners WHERE raffle_id=? ORDER BY id DESC",
+            (raffle_id,)
+        ).fetchall()
         rows = con.execute(
             """SELECT p.*, COALESCE(NULLIF(p.username,''),bu.username,'') AS current_username,
                       r.name AS raffle_name, COALESCE(rq.created_at,p.created_at) AS play_created_at,
@@ -2869,11 +2873,24 @@ async def send_history(update, context, raffle_id):
     if not rows:
         await target.reply_text("Esta lista todavía no tiene jugadas aprobadas ni rechazadas.", reply_markup=admin_keyboard())
         return
+    winners_by_ticket = {}
+    for winner_row in winners:
+        key = (int(winner_row["user_id"]), int(winner_row["number"]))
+        if key not in winners_by_ticket:
+            winners_by_ticket[key] = winner_row
+    prize_amount_text = format_brl(raffle_prize_amount(raffle))
     for row in rows:
         try:
-            numbers = ", ".join(f"{int(n):02d}" for n in json.loads(row["numbers_json"]))
+            played_numbers = [int(n) for n in json.loads(row["numbers_json"])]
+            numbers = ", ".join(f"{n:02d}" for n in played_numbers)
         except (TypeError, ValueError, json.JSONDecodeError):
+            played_numbers = []
             numbers = str(row["numbers_json"])
+        winning_record = next(
+            (winners_by_ticket[(int(row["user_id"]), n)] for n in played_numbers
+             if (int(row["user_id"]), n) in winners_by_ticket),
+            None
+        )
         username = (row["current_username"] or row["username"] or "").lstrip("@")
         display = f"@{username}" if username else (row["name"] or "Usuario")
         status = str(row["status"]).upper()
@@ -2890,6 +2907,18 @@ async def send_history(update, context, raffle_id):
             f"🧾 <b>Comprobante:</b> {receipt}\n"
             f"🆔 <b>Registro:</b> #{int(row['id'])} · Solicitud {html.escape(str(row['request_id']))}"
         )
+        if winning_record:
+            winner_date = str(winning_record["announced_at"] or "Fecha no registrada").replace("T", " ")[:19]
+            prize_name = str(raffle["prize"] or "Premio de la rifa")
+            prize_detail = str(raffle["prize_value"] or prize_amount_text)
+            body += (
+                "\\n\\n🏆 <b>¡USUARIO GANADOR DEL PREMIO!</b>\\n"
+                f"📅 <b>Fecha del resultado:</b> {html.escape(winner_date)}\\n"
+                f"🎁 <b>Premio ganado:</b> {html.escape(prize_name)}\\n"
+                f"💰 <b>Valor del premio:</b> {html.escape(prize_amount_text)}\\n"
+                f"📋 <b>Detalle configurado:</b> {html.escape(prize_detail)}\\n"
+                f"🔢 <b>Número ganador:</b> {int(winning_record['number']):02d}"
+            )
         buttons = [
             InlineKeyboardButton("↗️ Reenviar este registro al usuario", callback_data=f"historyforward:{int(row['id'])}")
         ]
