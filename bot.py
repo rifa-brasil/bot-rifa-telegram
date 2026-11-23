@@ -53,6 +53,8 @@ RESERVATION_MINUTES = 5  # Primera ventana: 5 min para realizar el pago
 PAY_BUTTON_MINUTES = 5   # Segunda ventana: 5 min para avisar que ya pagó
 CURRENCY = "R$"  # Todos los valores de la rifa se expresan en reales brasileños
 FLORIDA_PICK3_PDF = "https://files.floridalottery.com/exptkt/p3.pdf"
+FLORIDA_PICK3_ANDROID_URL = "https://play.google.com/store/apps/details?id=com.flalottery.FLALOTTERY"
+FLORIDA_PICK3_IOS_URL = "https://apps.apple.com/us/app/florida-lottery/id476160599"
 PICK3_AUTO_ANNOUNCE = os.getenv("PICK3_AUTO_ANNOUNCE", "false").lower() == "true"
 PICK3_DRAW = os.getenv("PICK3_DRAW", "E").upper()  # M=mediodía, E=noche
 
@@ -450,26 +452,67 @@ async def require_channel(update, context):
 
 
 def user_keyboard():
-    """Menú moderno y compacto para participantes."""
+    """Panel principal: todas las consultas están disponibles sin submenús."""
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("🎟️ Ver listas activas"), KeyboardButton("👤 Mi cuenta")],
-            [KeyboardButton("💳 Historial de pagos"), KeyboardButton("🏆 Ganadores")],
-            [KeyboardButton("🆘 Ayuda / soporte")],
+            [KeyboardButton("🎟️ Ver listas activas"), KeyboardButton("🎟️ Mis jugadas")],
+            [KeyboardButton("💳 Historial de pagos"), KeyboardButton("🏆 Mis premios")],
+            [KeyboardButton("📚 Resultados y ganadores"), KeyboardButton("🆘 Ayuda / soporte")],
         ],
         resize_keyboard=True, is_persistent=True,
-        input_field_placeholder="¿Qué deseas consultar?"
+        input_field_placeholder="Selecciona una opción"
     )
 
 
-def user_stats_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎟️ Mis jugadas", callback_data="userstats:plays"),
-         InlineKeyboardButton("💳 Pagos", callback_data="userstats:payments")],
-        [InlineKeyboardButton("🏆 Mis premios", callback_data="userstats:prizes"),
-         InlineKeyboardButton("📚 Resultados y ganadores", callback_data="userstats:history")],
-        [InlineKeyboardButton("⬅️ Volver", callback_data="userstats:back")]
-    ])
+def build_user_stats(uid, action):
+    """Construye el historial solicitado para mostrarlo desde el panel principal."""
+    with db() as con:
+        if action == "plays":
+            rows = con.execute(
+                "SELECT p.*,r.name AS raffle_name FROM purchases p JOIN raffles r ON r.id=p.raffle_id WHERE p.user_id=? ORDER BY p.id DESC LIMIT 30",
+                (uid,)
+            ).fetchall()
+            pending = con.execute(
+                "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','payment_reported','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
+                (uid,)
+            ).fetchall()
+            blocks = [f"🎟️ {r['raffle_name']} · Números: {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))} · {float(r['amount']):.2f} {CURRENCY} · {r['status']}" for r in rows]
+            blocks += [f"⏳ {r['raffle_name']} · Números: {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))} · {float(r['total_amount'] or 0):.2f} {CURRENCY} · {r['status']}" for r in pending]
+            title = "🎟️ *MIS JUGADAS*"
+            empty = "Todavía no tienes jugadas registradas."
+        elif action == "prizes":
+            rows = con.execute(
+                "SELECT w.*,r.name AS raffle_name,r.prize,r.prize_value FROM winners w JOIN raffles r ON r.id=w.raffle_id WHERE w.user_id=? ORDER BY w.id DESC LIMIT 30",
+                (uid,)
+            ).fetchall()
+            blocks = [f"🏆 {r['raffle_name']} · Número: {int(r['number']):02d} · Premio: {r['prize'] or 'Por anunciar'} · {'Recibido' if r['prize_received'] else 'Pendiente de confirmar'}" for r in rows]
+            title = "🏆 *MIS PREMIOS*"
+            empty = "Todavía no tienes premios registrados."
+        elif action == "payments":
+            rows = con.execute(
+                "SELECT p.*,r.name AS raffle_name FROM purchases p JOIN raffles r ON r.id=p.raffle_id WHERE p.user_id=? ORDER BY p.id DESC LIMIT 40",
+                (uid,)
+            ).fetchall()
+            pending = con.execute(
+                "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','payment_reported','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
+                (uid,)
+            ).fetchall()
+            blocks = [f"💳 {r['raffle_name']} · {float(r['amount']):.2f} {CURRENCY} · {r['status']} · {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))}" for r in rows]
+            blocks += [f"⏳ {r['raffle_name']} · {float(r['total_amount'] or 0):.2f} {CURRENCY} · {r['status']} · {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))}" for r in pending]
+            title = "💳 *HISTORIAL DE PAGOS*"
+            empty = "Todavía no hay pagos ni solicitudes registrados."
+        else:
+            rows = con.execute(
+                "SELECT w.*,r.name AS raffle_name,r.prize,r.prize_value FROM winners w JOIN raffles r ON r.id=w.raffle_id ORDER BY w.announced_at DESC LIMIT 20"
+            ).fetchall()
+            results = con.execute(
+                "SELECT draw_date,draw_type,result,fireball FROM lottery_results ORDER BY draw_date DESC,fetched_at DESC LIMIT 10"
+            ).fetchall()
+            blocks = [f"🏆 {r['raffle_name']} · Número ganador: {int(r['number']):02d} · Premio: {r['prize'] or 'Por anunciar'} · {'Comprobante publicado' if r['prize_received'] else 'Entrega pendiente'}" for r in rows]
+            blocks += [f"🎯 Florida Pick 3 · {r['draw_date']} · {'Mediodía' if r['draw_type']=='M' else 'Noche'}: {r['result']}" for r in results]
+            title = "📚 *RESULTADOS Y GANADORES*"
+            empty = "Todavía no hay resultados publicados."
+    return title, "\n\n".join(blocks) if blocks else empty
 
 
 def admin_keyboard():
@@ -498,7 +541,7 @@ def admin_flow_prompt(step):
         "name": "Escribe el *nombre* de la nueva lista:",
         "price": "¿Cuál será el *valor de cada número* en reales (R$)? Ejemplo: 15 o 15,50.",
         "prize": "Describe el *premio* que se entregará:",
-        "prize_value": "¿Qué *porcentaje del total recaudado* será el valor del premio? Escribe, por ejemplo, 80 o 80%. La lista tiene 100 números."
+        "prize_value": "¿Qué *porcentaje del total recaudado* será el premio? Escribe entre 70 y 80 (por ejemplo, 80). La lista tiene 100 números."
     }
     return prompts[step]
 
@@ -597,16 +640,22 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not existing:
         welcome = (
             f"👋 ¡Bienvenido/a, {user.first_name or 'participante'}!\n\n"
-            "🎟️ *¿Cómo funciona la rifa?*\n"
-            "• Cada lista tiene 100 números, del 01 al 100.\n"
-            "• Elige tus números aquí, en este chat privado.\n"
-            "• Cada número solo puede pertenecer a un participante. Si está ocupado, te avisaremos.\n"
-            "• Para completar tu jugada, sigue las instrucciones de pago y espera la confirmación del bot.\n"
-            "• Hay que esperar a que se completen los 100 números. Solo entonces se determina el ganador con el resultado de *Florida Pick 3* de Florida.\n\n"
-            "📌 Consulta las listas activas para ver disponibilidad, precio, progreso y premio. En Mi cuenta encontrarás tus jugadas, pagos y premios; Ayuda te conecta con el administrador."
+            "ℹ️ *INFORMACIÓN DEL CANAL Y DE LAS RIFAS*\n"
+            "Este canal informa sobre las listas de rifas, números confirmados, resultados y ganadores. Para elegir números y gestionar tus participaciones, utiliza los botones del chat privado del bot. La unión al canal es obligatoria para utilizar el bot.\n\n"
+            "🎟️ *¿Cómo funciona?*\n"
+            "• Cada lista tiene 100 números, del 01 al 100. Puedes jugar uno o varios números.\n"
+            "• El precio por número puede ser diferente en cada lista. Por ejemplo, una lista puede costar R$ 10 por número, otra R$ 20 y otra R$ 25. Consulta las listas activas para confirmar el precio, el premio y los números disponibles de cada una.\n"
+            "• Un número no puede reservarse o confirmarse para dos personas. Sigue las instrucciones de pago y espera la confirmación del bot.\n"
+            "• El sorteo se realiza cuando los 100 números de una lista estén ocupados y confirmados. El número ganador se determina usando el resultado nocturno de *Florida Pick 3*.\n"
+            "• Si la lista se completa antes de las 21:00 (hora de Florida), se utiliza el sorteo nocturno de ese mismo día. Si se completa después de las 21:00, se utiliza el sorteo nocturno del día siguiente.\n\n"
+            "🏆 *Premio*\n"
+            "El premio anunciado para cada lista corresponde al 70%–80% de la recaudación total, según el porcentaje definido para esa lista. Ejemplo: si hay 100 números a R$ 10, la recaudación es R$ 1.000 y el premio estimado será de R$ 700 a R$ 800, según las condiciones publicadas en esa lista. El tiempo para completar una lista puede variar; el sorteo y la entrega se anuncian cuando se cumplan las condiciones de la lista.\n\n"
+            "🔎 *Verificación del resultado*\n"
+            "El resultado publicado por el bot debe poder contrastarse con el resultado oficial de Florida Lottery. En el canal se facilitará un enlace o aplicación oficial/de consulta para que puedas comprobarlo por tu cuenta.\n\n"
+            "📌 Usa *Ver listas activas* para revisar precios, premios y progreso. Los demás botones del menú te permiten consultar tus jugadas, pagos, premios y resultados, o contactar con soporte."
         )
     else:
-        welcome = "¡Hola de nuevo! Desde este menú puedes ver listas, progreso, tus pagos, ganadores y solicitar ayuda."
+        welcome = "¡Hola de nuevo! Usa los botones del panel para consultar listas, tus jugadas, pagos, premios, resultados y soporte."
     await update.effective_message.reply_text(welcome, parse_mode="Markdown", reply_markup=user_keyboard())
 
 
@@ -667,14 +716,14 @@ async def new_raffle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(parts) < 4:
         await update.effective_message.reply_text(
             "Uso: /nueva Nombre de lista|15|Descripción del premio|80%\n"
-            "La lista se crea automáticamente con 100 números y el grupo configurado."
+            "El porcentaje del premio debe estar entre 70% y 80%. La lista se crea con 100 números."
         )
         return
     try:
         name, price_text, prize, percent_text = parts[:4]
         price = Decimal(price_text.replace(",", "."))
         percent = Decimal(percent_text.replace("%", "").replace(",", "."))
-        if not name or price < 0 or not Decimal("0") <= percent <= Decimal("100"):
+        if not name or price < 0 or not Decimal("70") <= percent <= Decimal("80"):
             raise ValueError()
         amount = (price * Decimal("100") * percent / Decimal("100")).quantize(Decimal("0.01"))
         amount_fmt = f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -684,7 +733,7 @@ async def new_raffle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_message.reply_text("El ID del grupo configurado (GROUP_CHAT_ID) es 0. Configúralo en el entorno del bot.")
             return
     except (ValueError, InvalidOperation):
-        await update.effective_message.reply_text("Datos inválidos. Revisa el precio y el porcentaje (0 a 100).")
+        await update.effective_message.reply_text("Datos inválidos. Revisa el precio y el porcentaje del premio (70% a 80%).")
         return
     with db() as con:
         cur = con.execute(
@@ -809,7 +858,7 @@ async def process_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 raise ValueError()
             percent_text = value.strip().replace("%", "").replace(",", ".")
             percent = Decimal(percent_text)
-            if not Decimal("0") <= percent <= Decimal("100"):
+            if not Decimal("70") <= percent <= Decimal("80"):
                 raise ValueError()
             prize_amount = Decimal(str(flow["price"])) * Decimal("100") * percent / Decimal("100")
             prize_amount = prize_amount.quantize(Decimal("0.01"))
@@ -977,6 +1026,22 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("🔒 Para jugar, abre el chat privado del bot y pulsa /start. Las jugadas no se realizan en el grupo.")
         return
 
+    # Respuesta directa a una consulta de soporte; el botón identifica al remitente exacto.
+    support_target = context.user_data.get("awaiting_support_reply")
+    if is_admin(update.effective_user.id) and support_target:
+        target_id = int(support_target)
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text="💬 RESPUESTA DE SOPORTE\n\n" + text,
+            )
+            context.user_data.pop("awaiting_support_reply", None)
+            await msg.reply_text(f"✅ Respuesta enviada al participante {target_id}.", reply_markup=admin_keyboard())
+        except Exception:
+            log.exception("No se pudo enviar la respuesta de soporte al usuario %s", target_id)
+            await msg.reply_text("❌ No pude enviar la respuesta. Comprueba que el usuario haya iniciado el bot.")
+        return
+
     # La respuesta del administrador a una solicitud de llave se envía directamente al usuario.
     pending_key = context.user_data.get("awaiting_key_delivery")
     if is_admin(update.effective_user.id) and pending_key:
@@ -1029,14 +1094,15 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text in {"🎟️ Ver listas activas", "listas", "lista", "hola", "buenas", "rifa", "inicio"}:
             await lists_cmd(update, context)
             return
-        if text in {"📊 Estadísticas", "👤 Mi cuenta"}:
-            await msg.reply_text("👤 *TU CUENTA*\nConsulta tus jugadas, pagos y premios:", parse_mode="Markdown", reply_markup=user_stats_keyboard())
-            return
-        if text == "💳 Historial de pagos":
-            await msg.reply_text("💳 *HISTORIAL DE PAGOS*\nElige Pagos para consultar tus operaciones:", parse_mode="Markdown", reply_markup=user_stats_keyboard())
-            return
-        if text == "🏆 Ganadores":
-            await msg.reply_text("🏆 *RESULTADOS Y GANADORES*", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📚 Ver historial", callback_data="userstats:history")]]))
+        direct_actions = {
+            "🎟️ Mis jugadas": "plays",
+            "💳 Historial de pagos": "payments",
+            "🏆 Mis premios": "prizes",
+            "📚 Resultados y ganadores": "history",
+        }
+        if text in direct_actions:
+            title, body = build_user_stats(update.effective_user.id, direct_actions[text])
+            await msg.reply_text(title + "\n\n" + body, parse_mode="Markdown", reply_markup=user_keyboard())
             return
         if text == "🆘 Ayuda / soporte":
             context.user_data["awaiting_support"] = True
@@ -1045,11 +1111,15 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data.get("awaiting_support"):
             context.user_data.pop("awaiting_support", None)
             try:
+                support_keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("↩️ Responder a este participante", callback_data=f"supportreply:{update.effective_user.id}")
+                ]])
                 await context.bot.send_message(ADMIN_ID,
                     "🆘 SOLICITUD DE SOPORTE\n"
                     f"Participante: {update.effective_user.full_name}\n"
                     f"ID: {update.effective_user.id}\n"
-                    f"Usuario: @{update.effective_user.username or 'sin username'}\n\n{text}")
+                    f"Usuario: @{update.effective_user.username or 'sin username'}\n\n{text}",
+                    reply_markup=support_keyboard)
                 await msg.reply_text("✅ Tu consulta fue enviada al administrador. Te responderá por este chat.", reply_markup=user_keyboard())
             except Exception:
                 log.exception("No se pudo enviar la consulta de soporte")
@@ -1275,6 +1345,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
+    if data.startswith("supportreply:"):
+        if not is_admin(uid) or q.message.chat.type != "private":
+            await q.answer("Solo el administrador puede responder al soporte.", show_alert=True)
+            return
+        try:
+            target_id = int(data.split(":", 1)[1])
+        except (TypeError, ValueError):
+            await q.answer("Identificador de participante inválido.", show_alert=True)
+            return
+        context.user_data["awaiting_support_reply"] = target_id
+        await q.answer("Puedes escribir la respuesta.")
+        await q.message.reply_text(
+            f"✍️ Escribe la respuesta para el participante {target_id}. Se enviará directamente a su chat privado."
+        )
+        return
+
     if data.startswith("keyreply:"):
         if not is_admin(uid) or q.message.chat.type != "private":
             await q.answer("Solo el administrador puede responder a esta solicitud.", show_alert=True)
@@ -1396,7 +1482,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             body = "\n\n".join(blocks) if blocks else "Todavía no hay resultados publicados."
             title = "📚 *RESULTADOS Y GANADORES*"
         await q.answer()
-        await q.message.reply_text(title + "\n\n" + body, parse_mode="Markdown", reply_markup=user_stats_keyboard())
+        await q.message.reply_text(title + "\n\n" + body, parse_mode="Markdown", reply_markup=user_keyboard())
         return
 
     if data.startswith("userpaid:"):
@@ -2271,15 +2357,25 @@ async def welcome_channel_member(update: Update, context: ContextTypes.DEFAULT_T
         if member.id == context.bot.id:
             return
         try:
+            info_text = (
+                f"👋 ¡Bienvenido/a, {html.escape(member.first_name or 'participante')}!\n\n"
+                "ℹ️ INFORMACIÓN\n"
+                "Este canal comparte las listas de rifas, avances, jugadas confirmadas, resultados y ganadores. Para participar, abre el chat privado del bot y pulsa /start; la membresía en este canal es obligatoria para utilizar sus funciones.\n\n"
+                "🎟️ CÓMO FUNCIONAN LAS LISTAS\n"
+                "Cada lista tiene 100 números (01–100). Puedes elegir uno o varios números. El precio por número y el premio pueden cambiar de una lista a otra: por ejemplo, una lista puede costar R$ 10 por número, otra R$ 20 y otra R$ 25. Consulta cada lista antes de participar para ver su precio, premio y disponibilidad.\n\n"
+                "🏆 SORTEO Y PREMIO\n"
+                "Cuando los 100 números de una lista estén ocupados y confirmados, se utiliza el resultado nocturno de Florida Pick 3. Si se completa antes de las 21:00 (hora de Florida), se toma el sorteo de esa noche; si se completa después, se toma el de la noche siguiente. El premio será del 70% al 80% de la recaudación, según el porcentaje indicado en esa lista. Ejemplo: 100 números a R$ 10 generan R$ 1.000; el premio será de R$ 700 a R$ 800. La lista puede tardar unos 3 días o hasta una semana en completarse, dependiendo de la participación.\n\n"
+                "🔎 VERIFICACIÓN\n"
+                "Descarga la aplicación oficial Florida Lottery desde el botón correspondiente y compara el resultado con el que publique el bot. La referencia válida es el resultado oficial de Florida Lottery.\n\n"
+                "👇 Abre el bot y pulsa /start para comenzar."
+            )
+            channel_markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📲 Descargar para Android", url=FLORIDA_PICK3_ANDROID_URL)],
+                [InlineKeyboardButton("🍎 Descargar para iPhone", url=FLORIDA_PICK3_IOS_URL)],
+            ])
             await context.bot.send_message(
-                chat_id=CHANNEL_CHAT_ID,
-                text=(f"👋 ¡Bienvenido/a, {html.escape(member.first_name or 'participante')}!\n\n"
-                      "📌 Reglas del canal:\n"
-                      "• El canal publica las jugadas confirmadas para transparencia.\n"
-                      "• Para elegir números, consultar tus jugadas y recibir mensajes, usa el chat privado del bot.\n"
-                      "• Únete al canal antes de utilizar las listas y estadísticas del bot.\n\n"
-                      "👇 Abre el bot y pulsa /start para participar."),
-                parse_mode="HTML"
+                chat_id=CHANNEL_CHAT_ID, text=info_text,
+                parse_mode="HTML", reply_markup=channel_markup
             )
         except Exception:
             log.exception("No se pudo publicar bienvenida al nuevo miembro del canal")
