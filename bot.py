@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 3
+Bot de rifas Telegram - versión 4
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -94,6 +94,14 @@ def db():
 def init_db():
     with db() as con:
         con.executescript("""
+        CREATE TABLE IF NOT EXISTS bot_settings (
+            setting_key TEXT PRIMARY KEY,
+            setting_value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS raffle_progress_messages (
+            raffle_id INTEGER NOT NULL, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
+            PRIMARY KEY (raffle_id,user_id)
+        );
         CREATE TABLE IF NOT EXISTS bot_users (
             user_id INTEGER PRIMARY KEY,
             first_name TEXT DEFAULT '',
@@ -148,6 +156,7 @@ def init_db():
             username TEXT DEFAULT '',
             numbers_json TEXT NOT NULL,
             amount REAL NOT NULL DEFAULT 0,
+            payment_receipt_file_id TEXT DEFAULT '',
             status TEXT NOT NULL,
             created_at TEXT NOT NULL,
             FOREIGN KEY (raffle_id) REFERENCES raffles(id)
@@ -203,6 +212,9 @@ def init_db():
         raffle_columns = {r[1] for r in con.execute("PRAGMA table_info(raffles)")}
         if "prize_value" not in raffle_columns:
             con.execute("ALTER TABLE raffles ADD COLUMN prize_value TEXT DEFAULT ''")
+        purchase_columns = {r[1] for r in con.execute("PRAGMA table_info(purchases)")}
+        if "payment_receipt_file_id" not in purchase_columns:
+            con.execute("ALTER TABLE purchases ADD COLUMN payment_receipt_file_id TEXT DEFAULT ''")
         request_columns = {r[1] for r in con.execute("PRAGMA table_info(requests)")}
         for col, declaration in [
             ("key_message_id", "INTEGER"),
@@ -211,6 +223,7 @@ def init_db():
             ("payment_deadline_at", "TEXT"),
             ("reported_at", "TEXT"),
             ("claim_receipt_file_id", "TEXT DEFAULT ''"),
+            ("payment_receipt_file_id", "TEXT DEFAULT ''"),
             ("price_per_number", "REAL DEFAULT 0"),
             ("total_amount", "REAL DEFAULT 0")
         ]:
@@ -243,6 +256,8 @@ def init_db():
                )""",
             (iso_now(),)
         )
+        # El administrador controla manualmente si se aceptan nuevas jugadas.
+        con.execute("INSERT OR IGNORE INTO bot_settings(setting_key,setting_value) VALUES('playing_enabled','0')")
         # No crear rifas ficticias automáticamente: las listas se crean desde /admin.
 
 
@@ -297,11 +312,64 @@ def stats(raffle_id):
         }
 
 
-def progress_bar(occupied, total, width=12):
+def progress_bar(occupied, total, width=10):
     total = max(int(total or 0), 1)
-    ratio = max(0.0, min(1.0, int(occupied or 0) / total))
+    count = max(0, min(total, int(occupied or 0)))
+    ratio = count / total
     filled = int(round(ratio * width))
-    return "█" * filled + "░" * (width - filled)
+    percent = int(round(ratio * 100))
+    return f"{'🟩' * filled}{'⬜' * (width - filled)} {percent}%"
+
+
+def is_playing_enabled():
+    with db() as con:
+        row = con.execute("SELECT setting_value FROM bot_settings WHERE setting_key='playing_enabled'").fetchone()
+    return bool(row and row[0] == '1')
+
+
+def set_playing_enabled(enabled):
+    with db() as con:
+        con.execute("INSERT INTO bot_settings(setting_key,setting_value) VALUES('playing_enabled',?) "
+                    "ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value",
+                    ('1' if enabled else '0',))
+
+
+def play_status_text():
+    count = eligible_user_count()
+    return (f"👥 Usuarios elegibles: {count}/100\n"
+            f"🎟️ Jugadas: {'HABILITADAS' if is_playing_enabled() else 'BLOQUEADAS'}")
+
+
+async def notify_member_count(context, count):
+    """Informa al administrador y a usuarios registrados cada alta elegible."""
+    enabled = is_playing_enabled()
+    status = 'habilitadas' if enabled else 'bloqueadas por el administrador'
+    text = f"👥 Actualización de participantes: {count} usuarios registrados en el bot y miembros del canal.\n🎟️ Las jugadas están {status}."
+    try:
+        await context.bot.send_message(ADMIN_ID, text + ("\n\n✅ Ya se alcanzó el mínimo de 100. Puedes desbloquear las jugadas desde tu panel." if count >= 100 and not enabled else ""))
+    except Exception:
+        log.exception("No se pudo notificar al administrador el contador de miembros")
+    with db() as con:
+        ids = [int(r[0]) for r in con.execute("SELECT user_id FROM bot_users WHERE channel_member=1").fetchall()]
+    for user_id in ids:
+        try:
+            await context.bot.send_message(user_id, text, reply_markup=user_keyboard())
+        except Exception:
+            log.debug("No se pudo enviar contador al usuario %s", user_id, exc_info=True)
+        await asyncio.sleep(0.04)
+
+
+async def refresh_raffle_progress_messages(context, raffle_id):
+    """Actualiza los mensajes de disponibilidad que cada usuario abrió para esta lista."""
+    with db() as con:
+        targets = con.execute("SELECT user_id,chat_id,message_id FROM raffle_progress_messages WHERE raffle_id=?", (raffle_id,)).fetchall()
+    body = list_text(raffle_id)
+    for target in targets:
+        try:
+            await context.bot.edit_message_text(chat_id=target['chat_id'], message_id=target['message_id'],
+                                                text=body, parse_mode='Markdown')
+        except Exception:
+            log.debug("No se pudo actualizar progreso para usuario %s", target['user_id'], exc_info=True)
 
 
 def list_text(raffle_id):
@@ -334,7 +402,7 @@ def list_text(raffle_id):
             mention = f"[{name}](tg://user?id={uid})" if uid else name
             lines.append(f"🔴 *{tag}*: {mention}")
     lines += [
-        "", f"📊 Progreso: `{progress_bar(s['occupied'], s['total'])}` *{s['occupied']}/{s['total']}*",
+        "", f"📊 Progreso: `{progress_bar(s['occupied'] + s['pending'], s['total'])}` *{s['occupied'] + s['pending']}/{s['total']}* (ocupados + pendientes)",
         f"🟢 Disponibles: *{s['available']}* | 🟡 Pendientes: *{s['pending']}*",
         f"💰 Recaudado (pagos aprobados): *{s['revenue']:.2f} {CURRENCY}*",
         f"Estado: *{s['status']}*"
@@ -377,6 +445,9 @@ ADMIN_MENU_ACTIONS = {
     "💾 Crear respaldo": "backup",
     "♻️ Restaurar respaldo": "restore",
     "👥 Historial": "history",
+    "👥 Usuarios actuales": "users",
+    "🔒 Bloquear jugadas": "block",
+    "🔓 Desbloquear jugadas": "unblock",
     "🔄 Actualizar panel": "back",
 }
 
@@ -458,7 +529,7 @@ async def sync_known_channel_members(bot):
             log.exception("No se pudo sincronizar membresía del usuario %s", user_id)
     after_count = eligible_user_count()
     if before_count < 100 <= after_count:
-        await notify_threshold_reached(type("Context", (), {"bot": bot})(), after_count)
+        await notify_member_count(type("Context", (), {"bot": bot})(), after_count)
     log.info("Sincronización de canal terminada: %s usuarios elegibles", after_count)
 
 
@@ -554,7 +625,7 @@ def build_user_stats(uid, action):
                 (uid,)
             ).fetchall()
             pending = con.execute(
-                "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','payment_reported','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
+                "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','payment_reported','awaiting_payment_receipt','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
                 (uid,)
             ).fetchall()
             blocks = [f"🎟️ {r['raffle_name']} · Números: {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))} · {float(r['amount']):.2f} {CURRENCY} · {r['status']}" for r in rows]
@@ -575,7 +646,7 @@ def build_user_stats(uid, action):
                 (uid,)
             ).fetchall()
             pending = con.execute(
-                "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','payment_reported','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
+                "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','payment_reported','awaiting_payment_receipt','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
                 (uid,)
             ).fetchall()
             blocks = [f"💳 {r['raffle_name']} · {float(r['amount']):.2f} {CURRENCY} · {r['status']} · {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))}" for r in rows]
@@ -603,7 +674,8 @@ def admin_keyboard():
             [KeyboardButton("➕ Crear lista"), KeyboardButton("📋 Listas activas")],
             [KeyboardButton("📊 Estadísticas"), KeyboardButton("🏆 Indicar Número Ganador")],
             [KeyboardButton("🔄 Resetear lista"), KeyboardButton("🗑️ Borrar lista")],
-            [KeyboardButton("👥 Historial")],
+            [KeyboardButton("👥 Historial"), KeyboardButton("👥 Usuarios actuales")],
+            [KeyboardButton("🔒 Bloquear jugadas"), KeyboardButton("🔓 Desbloquear jugadas")],
             [KeyboardButton("💾 Crear respaldo"), KeyboardButton("♻️ Restaurar respaldo")],
             [KeyboardButton("🔄 Actualizar panel")],
         ],
@@ -678,22 +750,19 @@ async def lists_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not raffles:
         await update.effective_message.reply_text("No hay listas activas en este momento.", reply_markup=user_keyboard())
         return
-    summaries = []
-    for raffle in raffles:
+    await update.effective_message.reply_text("🎟️ *LISTAS DISPONIBLES*\nConsulta cada lista y pulsa el botón que aparece justo debajo de su información.", parse_mode="Markdown", reply_markup=user_keyboard())
+    for index, raffle in enumerate(raffles, 1):
         st = stats(raffle["id"])
-        summaries.append(
-            f"🎟️ *{raffle['name']}* (#{raffle['id']})\n"
+        summary = (
+            f"🎟️ *{raffle['name']}* (Lista #{index})\n"
             f"🔢 Números: {raffle['total_numbers']} · 💵 Por número: {float(raffle['price']):.2f} {CURRENCY}\n"
             f"🏆 Premio: {raffle['prize'] or 'Por anunciar'}\n"
             f"💎 Valor del premio: {raffle.get('prize_value') or 'Por definir'}\n"
-            f"📊 {progress_bar(st['occupied'], st['total'])} {st['occupied']}/{st['total']} vendidos\n"
+            f"📊 Progreso: {progress_bar(st['occupied'] + st['pending'], st['total'])} ({st['occupied'] + st['pending']}/{st['total']})\n"
             f"🟢 Libres: {st['available']} · 🔴 Ocupados: {st['occupied']} · 🟡 Pendientes: {st['pending']}"
         )
-    await update.effective_message.reply_text(
-        "🎟️ *LISTAS DISPONIBLES*\n\n" + "\n\n".join(summaries) +
-        "\n\n👇 Selecciona la lista en la que deseas participar:",
-        parse_mode="Markdown", reply_markup=raffle_selector_keyboard(raffles)
-    )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(f"🎟️ Jugar en {raffle['name']}", callback_data=f"selectraffle:{raffle['id']}")]])
+        await update.effective_message.reply_text(summary, parse_mode="Markdown", reply_markup=keyboard)
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -723,10 +792,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     current_count = eligible_user_count()
 
-    if before_count < 100 <= current_count:
-        await notify_threshold_reached(context, current_count)
-    elif current_count >= 100 and not was_member:
-        await notify_user_ready(context, user.id, current_count)
+    if not existing or not was_member:
+        await notify_member_count(context, current_count)
 
     if not existing:
         welcome = (
@@ -743,13 +810,13 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "El premio anunciado para cada lista corresponde al 70%–80% de la recaudación total, según el porcentaje definido para esa lista. Ejemplo: 100 números a R$ 10 generan R$ 1.000 y un premio de R$ 700 a R$ 800, según las condiciones publicadas.\n\n"
             "🔎 *Verificación del resultado*\n"
             "Puedes consultar el resultado oficial de Florida Pick 3 o descargar la aplicación Florida Lottery con los accesos directos que aparecen debajo de este mensaje.\n\n"
-            f"👥 *Acceso a las jugadas:* actualmente hay {current_count}/100 usuarios registrados en el bot y miembros del canal. Puedes revisar el menú y las listas desde ahora, pero solo podrás reservar números cuando se alcance el mínimo de 100.\n\n"
+            f"👥 *Participantes actuales:* {current_count}/100 usuarios registrados en el bot y miembros del canal. El administrador habilitará las jugadas manualmente cuando lo considere oportuno.\n\n"
             "📌 Cada botón del menú principal abre directamente la consulta correspondiente, sin submenús."
         )
     else:
         welcome = (
             f"¡Hola de nuevo! Actualmente hay {current_count}/100 usuarios registrados en el bot y miembros del canal. "
-            "Puedes revisar las listas y consultar tus datos. La reserva de números se habilita al alcanzar 100 usuarios. "
+            "Puedes revisar las listas y consultar tus datos. Para jugar se requieren al menos 100 usuarios y que el administrador desbloquee las jugadas. "
             "Recuerda que no hay resultado ganador hasta que los 100 números de una lista estén ocupados y los pagos confirmados."
         )
     await update.effective_message.reply_text(
@@ -1027,6 +1094,30 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     if action != "create":
         context.user_data.pop("admin_flow", None)
+    if action == "block":
+        set_playing_enabled(False)
+        await msg.reply_text("🔒 Las jugadas quedaron BLOQUEADAS. Los usuarios podrán consultar, pero no reservar números.\n\n" + play_status_text(), reply_markup=admin_keyboard())
+        audit("playing_blocked", "El administrador bloqueó nuevas jugadas", update.effective_user.id)
+        return
+    if action == "unblock":
+        count = eligible_user_count()
+        if count < 100:
+            await msg.reply_text(f"⚠️ Aún no se alcanzan los 100 usuarios. Hay {count}/100. No desbloqueé las jugadas.", reply_markup=admin_keyboard())
+            return
+        set_playing_enabled(True)
+        await msg.reply_text("🔓 ¡Jugadas DESBLOQUEADAS! Los participantes ya pueden reservar números.\n\n" + play_status_text(), reply_markup=admin_keyboard())
+        with db() as con:
+            ids = [int(r[0]) for r in con.execute("SELECT user_id FROM bot_users WHERE channel_member=1").fetchall()]
+        for user_id in ids:
+            try:
+                await context.bot.send_message(user_id, "🎉 ¡EL ADMINISTRADOR HABILITÓ LAS JUGADAS! Ya puedes entrar en «Ver listas activas» y escoger tus números.", reply_markup=user_keyboard())
+            except Exception:
+                pass
+        audit("playing_unblocked", f"Jugadas habilitadas con {count} usuarios elegibles", update.effective_user.id)
+        return
+    if action == "users":
+        await msg.reply_text("👥 ESTADO DE PARTICIPANTES\n\n" + play_status_text(), reply_markup=admin_keyboard())
+        return
     if action == "create":
         context.user_data["admin_flow"] = {"kind": "create", "step": "name"}
         await msg.reply_text(admin_flow_prompt("name"), parse_mode="Markdown", reply_markup=admin_keyboard())
@@ -1143,6 +1234,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("❌ No pude enviar la respuesta. Comprueba que el usuario haya iniciado el bot.")
         return
 
+    if not is_admin(update.effective_user.id):
+        with db() as con:
+            waiting_receipt = con.execute(
+                "SELECT id FROM requests WHERE user_id=? AND status='awaiting_payment_receipt' ORDER BY created_at DESC LIMIT 1",
+                (update.effective_user.id,)
+            ).fetchone()
+        if waiting_receipt:
+            await msg.reply_text("📸 Para continuar es obligatorio adjuntar una foto del comprobante de transferencia. Envía la captura como imagen, no como texto.")
+            return
+
     # La respuesta del administrador a una solicitud de llave se envía directamente al usuario.
     pending_key = context.user_data.get("awaiting_key_delivery")
     if is_admin(update.effective_user.id) and pending_key:
@@ -1252,13 +1353,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not is_admin(update.effective_user.id):
         eligible = eligible_user_count()
-        if eligible < 100:
+        if eligible < 100 or not is_playing_enabled():
             await msg.reply_text(
                 "🔒 *LAS JUGADAS AÚN NO ESTÁN HABILITADAS*\n\n"
                 f"Actualmente hay {eligible} de 100 usuarios registrados en el bot y miembros del canal.\n"
-                "Puedes consultar las listas, revisar los números y utilizar las demás opciones del menú, "
-                "pero no puedes reservar números ni iniciar una jugada hasta que se alcance el mínimo de 100. "
-                "Cuando se llegue a esa cantidad, el bot enviará una notificación automáticamente.",
+                + ("Ya se alcanzó el mínimo, pero el administrador todavía no ha habilitado las jugadas." if eligible >= 100 else "Todavía no se ha alcanzado el mínimo de 100 usuarios.")
+                + " Puedes consultar las listas y el menú, pero no reservar números hasta que el administrador desbloquee las jugadas.",
                 parse_mode="Markdown", reply_markup=user_keyboard()
             )
             return
@@ -1362,6 +1462,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         with db() as con:
             con.execute("UPDATE requests SET group_message_id=? WHERE id=?", (sent.message_id, req_id))
+        await refresh_raffle_progress_messages(context, raffle["id"])
     except Exception:
         log.exception("No se pudo enviar la solicitud al chat privado")
         # Si no se pudo publicar, liberar la reserva para no bloquear números sin aviso.
@@ -1395,10 +1496,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             after_count = eligible_user_count()
             if not known or not bool(known["channel_member"]):
-                if before_count < 100 <= after_count:
-                    await notify_threshold_reached(context, after_count)
-                elif after_count >= 100:
-                    await notify_user_ready(context, uid, after_count)
+                await notify_member_count(context, after_count)
             await q.answer("¡Acceso confirmado!")
             await q.message.reply_text("✅ Ya tienes acceso. Usa el menú para ver las listas.", reply_markup=user_keyboard())
         elif reason == "config_missing":
@@ -1512,9 +1610,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         context.user_data["selected_raffle_id"] = raffle_id
         await q.answer("Lista seleccionada")
-        await q.message.reply_text(
-            list_text(raffle_id), parse_mode="Markdown", reply_markup=user_keyboard()
+        sent = await q.message.reply_text(
+            list_text(raffle_id) + "\n\n✍️ Escribe los números que deseas (por ejemplo: 05, 18, 72).",
+            parse_mode="Markdown", reply_markup=user_keyboard()
         )
+        with db() as con:
+            con.execute("INSERT INTO raffle_progress_messages(raffle_id,user_id,chat_id,message_id) VALUES(?,?,?,?) "
+                        "ON CONFLICT(raffle_id,user_id) DO UPDATE SET chat_id=excluded.chat_id,message_id=excluded.message_id",
+                        (raffle_id, uid, q.message.chat_id, sent.message_id))
         return
 
     if data.startswith(("available:", "progress:")):
@@ -1567,7 +1670,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     (uid,)
                 ).fetchall()
                 pending = con.execute(
-                    "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','payment_reported','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
+                    "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','payment_reported','awaiting_payment_receipt','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
                     (uid,)
                 ).fetchall()
             elif action == "prizes":
@@ -1581,7 +1684,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     (uid,)
                 ).fetchall()
                 pending = con.execute(
-                    "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','payment_reported','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
+                    "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','payment_reported','awaiting_payment_receipt','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
                     (uid,)
                 ).fetchall()
             else:
@@ -1632,33 +1735,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await q.answer("El plazo terminó y los números serán liberados.", show_alert=True)
                 return
             con.execute(
-                "UPDATE requests SET status='payment_reported',reported_at=? WHERE id=? AND status='awaiting_user_click'",
+                "UPDATE requests SET status='awaiting_payment_receipt',reported_at=? WHERE id=? AND status='awaiting_user_click'",
                 (iso_now(), req_id)
             )
-        await q.answer("Gracias. Tu aviso de pago quedó registrado.")
+        await q.answer("Ahora debes enviar la captura del pago.", show_alert=True)
         await q.edit_message_reply_markup(reply_markup=None)
-        raffle = get_raffle(req["raffle_id"])
-        nums = ", ".join(f"{n:02d}" for n in json.loads(req["numbers_json"]))
-        admin_msg = (
-            f"💵 *EL USUARIO INDICA QUE YA PAGÓ*\n\n"
-            f"Solicitud: `{req_id}`\nLista: *{raffle['name']}*\n"
-            f"Participante: {req['name']} (@{req['username'] or 'sin username'})\n"
-            f"ID Telegram: `{req['user_id']}`\nNúmeros: *{nums}*\n"
-            f"Importe: *{float(req['total_amount'] or 0):.2f} {CURRENCY}*\n\n"
-            "Verifica el pago antes de aprobar."
-        )
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🟢 Aprobar pago", callback_data=f"pay:ok:{req_id}"),
-            InlineKeyboardButton("🔴 Rechazar", callback_data=f"pay:no:{req_id}")
-        ]])
-        try:
-            await context.bot.send_message(ADMIN_ID, admin_msg, parse_mode="Markdown", reply_markup=keyboard)
-        except Exception:
-            log.exception("No se pudo avisar al administrador del pago declarado")
-            await context.bot.send_message(req["origin_chat"],
-                f"⚠️ [{req['name']}](tg://user?id={req['user_id']}) indicó que pagó, pero no se pudo notificar al administrador. "
-                "Contacta directamente con él.", parse_mode="Markdown")
-        audit("payment_reported_by_user", f"Solicitud {req_id}; usuario {uid}")
+        await context.bot.send_message(
+            chat_id=uid,
+            text=("📸 *CAPTURA OBLIGATORIA DEL PAGO*\n\n"
+                  "Para enviar tu pago a revisión, adjunta ahora una foto legible del comprobante de transferencia. "
+                  "El administrador revisará la captura y verificará que el importe y la transferencia coincidan antes de aprobar tus números. "
+                  "No envíes contraseñas, códigos de seguridad ni claves bancarias.") , parse_mode="Markdown")
         return
 
     if data.startswith("claimpay:"):
@@ -1735,9 +1822,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 con.execute("BEGIN IMMEDIATE")
                 req = con.execute("SELECT * FROM requests WHERE id=?", (req_id,)).fetchone()
                 if not req or req["status"] != "payment_reported":
-                    await q.edit_message_text("El usuario todavía no ha notificado el pago, o la solicitud ya fue procesada/venció.")
+                    stale_text = "El usuario todavía no ha enviado el comprobante, o la solicitud ya fue procesada/venció."
+                    if q.message.photo:
+                        await q.edit_message_caption(caption=stale_text)
+                    else:
+                        await q.edit_message_text(stale_text)
                     return
                 nums = json.loads(req["numbers_json"])
+                if action == "ok" and not req["payment_receipt_file_id"]:
+                    await q.message.reply_text("⛔ No se puede aprobar: falta la captura obligatoria del pago.")
+                    return
                 status = "approved" if action == "ok" else "rejected"
                 # Evita aprobar parcialmente números que ya no pertenecen a esta solicitud.
                 current_numbers = con.execute(
@@ -1747,7 +1841,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if action == "ok" and (len(current_numbers) != len(nums) or any(
                     x["status"] != "pending" or x["user_id"] != req["user_id"] for x in current_numbers
                 )):
-                    await q.edit_message_text("⚠️ No se puede aprobar: uno o más números ya no están reservados por esta solicitud. Revisa el historial antes de continuar.")
+                    error_text = "⚠️ No se puede aprobar: uno o más números ya no están reservados por esta solicitud. Revisa el historial antes de continuar."
+                    if q.message.photo:
+                        await q.edit_message_caption(caption=error_text)
+                    else:
+                        await q.edit_message_text(error_text)
                     return
                 for n in nums:
                     if action == "ok":
@@ -1766,9 +1864,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             (status, iso_now(), req_id))
                 con.execute(
                     """INSERT INTO purchases(raffle_id,request_id,user_id,name,username,numbers_json,
-                       amount,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)""",
+                       amount,payment_receipt_file_id,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
                     (req["raffle_id"], req_id, req["user_id"], req["name"], req["username"],
-                     json.dumps(nums), amount, status, iso_now())
+                     json.dumps(nums), amount, req["payment_receipt_file_id"] or '', status, iso_now())
                 )
                 if action == "ok":
                     raffle_row = con.execute("SELECT total_numbers,status FROM raffles WHERE id=?", (req["raffle_id"],)).fetchone()
@@ -1782,7 +1880,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raffle = get_raffle(req["raffle_id"])
         numbers_text = ", ".join(f"{n:02d}" for n in nums)
         if action == "ok":
-            await q.edit_message_text(f"✅ Solicitud {req_id} aprobada: {numbers_text}")
+            result_text = f"✅ Solicitud {req_id} aprobada: {numbers_text}"
+            if q.message.photo:
+                await q.edit_message_caption(caption=result_text)
+            else:
+                await q.edit_message_text(result_text)
             for chat_id, message_id in ((req["origin_chat"], req["group_message_id"]), (req["user_id"], req["key_message_id"])):
                 if message_id:
                     try:
@@ -1808,6 +1910,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception:
                     log.exception("No se pudo publicar la jugada confirmada en el canal")
+            await refresh_raffle_progress_messages(context, req["raffle_id"])
             st_after = stats(req["raffle_id"])
             if st_after and st_after["available"] <= max(5, int(st_after["total"] * 0.10)) and st_after["available"] > 0:
                 milestone = f"near_completion_{req['raffle_id']}"
@@ -1824,12 +1927,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             log.exception("No se pudo publicar aviso de lista próxima a completarse")
                     audit(milestone, f"Quedan {st_after['available']} números")
         else:
-            await q.edit_message_text(f"❌ Solicitud {req_id} rechazada.")
+            result_text = f"❌ Solicitud {req_id} rechazada."
+            if q.message.photo:
+                await q.edit_message_caption(caption=result_text)
+            else:
+                await q.edit_message_text(result_text)
             await context.bot.send_message(
                 req["origin_chat"],
                 f"❌ Tu solicitud para «{raffle['name']}» fue rechazada. Los números {numbers_text} vuelven a estar disponibles.",
                 parse_mode="Markdown"
             )
+            await refresh_raffle_progress_messages(context, req["raffle_id"])
         audit("payment_" + status, f"Solicitud {req_id}; números {numbers_text}", uid)
         return
 
@@ -2142,7 +2250,8 @@ async def send_json(update, context):
 async def send_history(update, context):
     with db() as con:
         rows = con.execute(
-            """SELECT p.created_at,p.name,p.user_id,p.numbers_json,p.amount,p.status,r.name raffle
+            """SELECT p.created_at,p.name,p.user_id,p.numbers_json,p.amount,p.status,
+                      p.payment_receipt_file_id,r.name raffle
                FROM purchases p JOIN raffles r ON r.id=p.raffle_id ORDER BY p.id DESC LIMIT 50"""
         ).fetchall()
     if not rows:
@@ -2150,7 +2259,8 @@ async def send_history(update, context):
     else:
         text = "👥 *Últimas 50 compras*\n" + "\n".join(
             f"{r['created_at'][:16]} · {r['name']} · {r['raffle']} · "
-            f"{r['numbers_json']} · {r['amount']:.2f} {CURRENCY} · {r['status']}"
+            f"{r['numbers_json']} · {r['amount']:.2f} {CURRENCY} · {r['status']} · "
+            f"{'captura adjunta' if r['payment_receipt_file_id'] else 'sin captura registrada'}"
             for r in rows
         )
     target = update.callback_query.message if update.callback_query else update.effective_message
@@ -2163,6 +2273,39 @@ async def prize_receipt_photo_handler(update: Update, context: ContextTypes.DEFA
     user = update.effective_user
     if not message or not user or not message.photo or message.chat.type != "private":
         return
+    # Comprobante obligatorio después de pulsar «Ya realicé el pago».
+    with db() as con:
+        payment_req = con.execute(
+            "SELECT * FROM requests WHERE user_id=? AND status='awaiting_payment_receipt' "
+            "AND COALESCE(payment_receipt_file_id,'')='' ORDER BY created_at DESC LIMIT 1", (user.id,)
+        ).fetchone()
+    if payment_req:
+        file_id = message.photo[-1].file_id
+        raffle = get_raffle(payment_req['raffle_id'])
+        numbers = ', '.join(f"{n:02d}" for n in json.loads(payment_req['numbers_json']))
+        caption = (
+            "💵 COMPROBANTE DE PAGO · REVISIÓN OBLIGATORIA\n"
+            f"Solicitud: {payment_req['id']}\nLista: {raffle['name'] if raffle else payment_req['raffle_id']}\n"
+            f"Participante: {payment_req['name']} (@{payment_req['username'] or 'sin username'})\n"
+            f"ID Telegram: {payment_req['user_id']}\nNúmeros: {numbers}\n"
+            f"Importe esperado: {float(payment_req['total_amount'] or 0):.2f} {CURRENCY}\n\n"
+            "Comprueba en el extracto bancario que la transferencia se haya acreditado y que importe, fecha y referencia coincidan."
+        )
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🟢 Aprobar pago", callback_data=f"pay:ok:{payment_req['id']}"),
+            InlineKeyboardButton("🔴 Rechazar", callback_data=f"pay:no:{payment_req['id']}")
+        ]])
+        try:
+            await context.bot.send_photo(chat_id=ADMIN_ID, photo=file_id, caption=caption, reply_markup=keyboard)
+            with db() as con:
+                con.execute("UPDATE requests SET payment_receipt_file_id=?,status='payment_reported' WHERE id=? AND status='awaiting_payment_receipt'", (file_id, payment_req['id']))
+            await message.reply_text("✅ Captura recibida y enviada al administrador. Tus números quedarán pendientes hasta que verifique el abono en el extracto bancario.")
+            audit("payment_receipt_uploaded", f"Solicitud {payment_req['id']}", user.id)
+        except Exception:
+            log.exception("No se pudo enviar la captura de pago al administrador")
+            await message.reply_text("❌ No pude entregar la captura. Inténtalo de nuevo; tu solicitud sigue pendiente.")
+        return
+
     with db() as con:
         claim_req = con.execute(
             "SELECT * FROM requests WHERE user_id=? AND status='claim_pending' "
@@ -2475,7 +2618,7 @@ async def pick3_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def welcome_channel_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Actualiza miembros conocidos del canal y notifica al alcanzar 100 elegibles."""
+    """Actualiza miembros conocidos y comunica al admin/usuarios el contador actual."""
     change = update.chat_member
     if not change or not change.chat or change.chat.id != CHANNEL_CHAT_ID:
         return
@@ -2507,10 +2650,17 @@ async def welcome_channel_member(update: Update, context: ContextTypes.DEFAULT_T
     after_count = eligible_user_count()
 
     if known and is_now_member and not bool(known["channel_member"]):
-        if before_count < 100 <= after_count:
-            await notify_threshold_reached(context, after_count)
-        elif after_count >= 100:
-            await notify_user_ready(context, member.id, after_count)
+        await notify_member_count(context, after_count)
+    elif not known and is_now_member and not was_member:
+        try:
+            await context.bot.send_message(
+                ADMIN_ID,
+                f"👤 Nuevo miembro del canal: {member.first_name or 'Usuario'} (ID {member.id}).\n"
+                f"Todavía no ha iniciado el bot; no se suma al contador hasta que pulse /start.\n"
+                f"👥 Usuarios elegibles actuales: {after_count}/100."
+            )
+        except Exception:
+            log.exception("No se pudo avisar al administrador del nuevo miembro del canal")
     elif known and was_member and not is_now_member:
         log.info("Usuario %s salió del canal; elegibles actuales: %s", member.id, after_count)
 
@@ -2526,7 +2676,7 @@ async def welcome_channel_member(update: Update, context: ContextTypes.DEFAULT_T
                 "IMPORTANTE: mientras no estén ocupados los 100 números de una lista y confirmados los pagos correspondientes, no hay resultado ganador para esa lista. Solo cuando se complete se utiliza el resultado nocturno de Florida Pick 3. Si se completa antes de las 21:00 (hora de Florida), se toma el sorteo de esa noche; si se completa después, el de la noche siguiente. El premio será del 70% al 80% de la recaudación, según lo publicado en cada lista.\n\n"
                 "🔎 VERIFICACIÓN\n"
                 "Consulta el resultado oficial de Florida Lottery mediante los accesos directos de abajo y compáralo con el resultado publicado por el bot.\n\n"
-                "👇 Abre el bot y pulsa /start. Para habilitar las jugadas se requieren 100 usuarios registrados en el bot y miembros del canal."
+                "👇 Abre el bot y pulsa /start. Cuando haya 100 usuarios registrados en el bot y miembros del canal, el administrador recibirá un aviso y podrá desbloquear manualmente las jugadas."
             )
             await context.bot.send_message(
                 chat_id=CHANNEL_CHAT_ID, text=info_text, parse_mode="HTML",
