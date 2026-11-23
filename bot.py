@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 6
+Bot de rifas Telegram - versión 9
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -52,8 +52,10 @@ CHANNEL_JOIN_URL = "https://t.me/+sRdEndX3bwszY2Ix"  # Enlace de acceso proporci
 DB_PATH = os.getenv("DB_PATH", "rifas.sqlite3")
 PORT = int(os.getenv("PORT", "10000"))
 RESERVATION_MINUTES = 5  # Primera ventana: 5 min para realizar el pago
-PAY_BUTTON_MINUTES = 5   # Segunda ventana: 5 min para avisar que ya pagó
+PAY_BUTTON_MINUTES = 5   # Compatibilidad; el botón de pago no caduca
 CURRENCY = "R$"  # Todos los valores de la rifa se expresan en reales brasileños
+# Añadir las llaves cuando el administrador las facilite: (nombre visible, llave PIX).
+PIX_KEYS = []
 FLORIDA_PICK3_PDF = "https://files.floridalottery.com/exptkt/p3.pdf"
 FLORIDA_PICK3_ANDROID_URL = "https://play.google.com/store/apps/details?id=com.flalottery.FLALOTTERY"
 FLORIDA_PICK3_IOS_URL = "https://apps.apple.com/us/app/florida-lottery/id476160599"
@@ -232,7 +234,8 @@ def init_db():
             ("claim_receipt_file_id", "TEXT DEFAULT ''"),
             ("payment_receipt_file_id", "TEXT DEFAULT ''"),
             ("price_per_number", "REAL DEFAULT 0"),
-            ("total_amount", "REAL DEFAULT 0")
+            ("total_amount", "REAL DEFAULT 0"),
+            ("reported_amount", "REAL DEFAULT 0")
         ]:
             if col not in request_columns:
                 con.execute(f"ALTER TABLE requests ADD COLUMN {col} {declaration}")
@@ -331,11 +334,12 @@ def stats(raffle_id):
         }
 
 
-def progress_bar(occupied, total, width=10):
+def progress_bar(occupied, total, width=20):
+    """Barra de progreso con segmentos verdes visibles desde el primer número."""
     total = max(int(total or 0), 1)
     count = max(0, min(total, int(occupied or 0)))
     ratio = count / total
-    filled = int(round(ratio * width))
+    filled = min(width, int(ratio * width + 0.999999)) if count else 0
     percent = int(round(ratio * 100))
     return f"{'🟩' * filled}{'⬜' * (width - filled)} {percent}%"
 
@@ -670,7 +674,7 @@ def build_user_stats(uid, action):
                 (uid,)
             ).fetchall()
             pending = con.execute(
-                "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','payment_reported','awaiting_payment_receipt','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
+                "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','awaiting_payment_amount','payment_reported','awaiting_payment_receipt','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
                 (uid,)
             ).fetchall()
             blocks = [f"🎟️ {r['raffle_name']} · Números: {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))} · {float(r['amount']):.2f} {CURRENCY} · {r['status']}" for r in rows]
@@ -691,7 +695,7 @@ def build_user_stats(uid, action):
                 (uid,)
             ).fetchall()
             pending = con.execute(
-                "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','payment_reported','awaiting_payment_receipt','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
+                "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','awaiting_payment_amount','payment_reported','awaiting_payment_receipt','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
                 (uid,)
             ).fetchall()
             blocks = [f"💳 {r['raffle_name']} · {float(r['amount']):.2f} {CURRENCY} · {r['status']} · {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))}" for r in rows]
@@ -1295,6 +1299,26 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Captura del importe declarado antes de recibir la foto obligatoria.
+    if update.effective_user and not is_admin(update.effective_user.id) and text:
+        with db() as con:
+            amount_req = con.execute("SELECT * FROM requests WHERE user_id=? AND status='awaiting_payment_amount' ORDER BY created_at DESC LIMIT 1", (update.effective_user.id,)).fetchone()
+        if amount_req:
+            normalized = text.strip().replace("R$", "").replace(" ", "")
+            if "," in normalized:
+                normalized = normalized.replace(".", "").replace(",", ".")
+            try:
+                declared = float(Decimal(normalized).quantize(Decimal("0.01")))
+                if declared <= 0:
+                    raise InvalidOperation
+            except (InvalidOperation, ValueError):
+                await msg.reply_text("❌ Monto inválido. Escribe un valor mayor que cero, por ejemplo: 15,00.")
+                return
+            with db() as con:
+                con.execute("UPDATE requests SET reported_amount=?,status='awaiting_payment_receipt' WHERE id=? AND status='awaiting_payment_amount'", (declared, amount_req["id"]))
+            await msg.reply_text(f"✅ Monto registrado: {declared:.2f} {CURRENCY}.\n\n📸 Ahora adjunta obligatoriamente la captura de la transferencia en este chat privado.")
+            return
+
     # Respuesta directa a una consulta de soporte; el botón identifica al remitente exacto.
     support_target = context.user_data.get("awaiting_support_reply")
     if is_admin(update.effective_user.id) and support_target:
@@ -1314,57 +1338,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         with db() as con:
             waiting_receipt = con.execute(
-                "SELECT id FROM requests WHERE user_id=? AND status='awaiting_payment_receipt' ORDER BY created_at DESC LIMIT 1",
+                "SELECT id FROM requests WHERE user_id=? AND status IN ('awaiting_payment_amount','awaiting_payment_receipt') ORDER BY created_at DESC LIMIT 1",
                 (update.effective_user.id,)
             ).fetchone()
         if waiting_receipt:
             await msg.reply_text("📸 Para continuar es obligatorio adjuntar una foto del comprobante de transferencia. Envía la captura como imagen, no como texto.")
             return
-
-    # La respuesta del administrador a una solicitud de llave se envía directamente al usuario.
-    pending_key = context.user_data.get("awaiting_key_delivery")
-    if is_admin(update.effective_user.id) and pending_key:
-        key_text = text.strip()
-        if not key_text:
-            await msg.reply_text("Escribe la llave que deseas enviar.")
-            return
-        try:
-            req_id = pending_key["request_id"]
-            with db() as con:
-                req = con.execute(
-                    "SELECT * FROM requests WHERE id=? AND user_id=?",
-                    (req_id, pending_key["user_id"])
-                ).fetchone()
-            if not req or req["status"] not in {"key_requested", "awaiting_button"}:
-                await msg.reply_text("❌ La solicitud ya no está disponible para entregar la llave.")
-                context.user_data.pop("awaiting_key_delivery", None)
-                return
-
-            payment_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("💵 Ya realicé el pago", callback_data=f"userpaid:{req_id}")],
-                [InlineKeyboardButton("🔁 Necesito la llave otra vez", callback_data=f"keyagain:{req_id}")]
-            ])
-            key_msg = await context.bot.send_message(
-                chat_id=pending_key["user_id"],
-                text=("🔑 LLAVE PIX\n\n" + key_text +
-                      "\n\nCuando hayas realizado el pago, pulsa el botón «Ya realicé el pago»."),
-                reply_markup=payment_keyboard
-            )
-            deadline = (now_utc() + timedelta(minutes=PAY_BUTTON_MINUTES)).isoformat()
-            with db() as con:
-                con.execute(
-                    """UPDATE requests
-                       SET status='awaiting_user_click',pay_button_at=?,payment_deadline_at=?,key_message_id=?
-                       WHERE id=? AND user_id=? AND status IN ('key_requested','awaiting_button')""",
-                    (iso_now(), deadline, key_msg.message_id, req_id, pending_key["user_id"])
-                )
-            context.user_data.pop("awaiting_key_delivery", None)
-            await msg.reply_text("✅ Llave PIX enviada al participante.")
-            audit("manual_key_sent", f"Solicitud {req_id} al usuario {pending_key['user_id']}", update.effective_user.id)
-        except Exception:
-            log.exception("No se pudo entregar la llave al usuario")
-            await msg.reply_text("❌ No se pudo enviar la llave. Comprueba que el usuario haya iniciado el bot.")
-        return
 
     if not is_admin(update.effective_user.id) and not await require_channel(update, context):
         return
@@ -1678,7 +1657,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Solicitud: `{req_id}`\nLista: *{raffle['name'] if raffle else req['raffle_id']}*\n"
             f"Participante: {req['name']} (@{req['username'] or 'sin username'})\n"
             f"ID Telegram: `{req['user_id']}`\nNúmeros: *{nums}*\n"
-            "Pulsa «Responder con llave» y después escribe aquí la llave que deseas enviar."
+            "Pulsa «Enviar llave PIX» y selecciona cuál deseas enviar."
         )
         key_admin_keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("✉️ Enviar llave PIX", callback_data=f"keyreply:{req['user_id']}:{req_id}")
@@ -1694,33 +1673,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             log.exception("No se pudo notificar solicitud de llave")
             await q.answer("No se pudo enviar la solicitud. Inténtalo de nuevo.", show_alert=True)
-        return
-
-    if data.startswith("keyagain:"):
-        req_id = data.split(":", 1)[1]
-        with db() as con:
-            con.execute("BEGIN IMMEDIATE")
-            req = con.execute("SELECT * FROM requests WHERE id=?", (req_id,)).fetchone()
-            if not req or uid != req["user_id"]:
-                await q.answer("Esta solicitud no te pertenece.", show_alert=True)
-                return
-            if req["status"] != "awaiting_user_click":
-                await q.answer("La solicitud ya no permite pedir otra llave.", show_alert=True)
-                return
-            con.execute("UPDATE requests SET status='key_requested',payment_deadline_at=NULL WHERE id=? AND status='awaiting_user_click'", (req_id,))
-        raffle = get_raffle(req["raffle_id"])
-        nums = ", ".join(f"{n:02d}" for n in json.loads(req["numbers_json"]))
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✉️ Enviar llave PIX", callback_data=f"keyreply:{uid}:{req_id}")]])
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"🔁 *REENVÍO DE LLAVE PIX SOLICITADO*\n\nSolicitud: `{req_id}`\nLista: *{raffle['name'] if raffle else req['raffle_id']}*\nParticipante: {req['name']}\nNúmeros: *{nums}*",
-            parse_mode="Markdown", reply_markup=keyboard
-        )
-        await q.answer("Solicitud enviada al administrador. El plazo se reiniciará cuando recibas la llave.")
-        try:
-            await q.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
         return
 
     if data == "download_pending":
@@ -1748,9 +1700,49 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Solo el administrador puede responder a esta solicitud.", show_alert=True)
             return
         _, user_id, req_id = data.split(":", 2)
-        context.user_data["awaiting_key_delivery"] = {"user_id": int(user_id), "request_id": req_id}
-        await q.answer("Escribe la llave en este chat.")
-        await q.message.reply_text(f"✍️ Escribe ahora la llave para el usuario {user_id}. Se enviará directamente a su chat privado.")
+        user_id = int(user_id)
+        with db() as con:
+            req = con.execute("SELECT * FROM requests WHERE id=? AND user_id=?", (req_id, user_id)).fetchone()
+        if not req or req["status"] not in {"key_requested", "awaiting_button"}:
+            await q.answer("La solicitud ya no está disponible.", show_alert=True)
+            return
+        if not PIX_KEYS:
+            await q.answer("Aún no hay llaves PIX configuradas.", show_alert=True)
+            await q.message.reply_text("⚙️ No hay llaves PIX configuradas. Cuando me proporciones las llaves, aparecerán aquí para seleccionarlas y enviarlas con un toque.")
+            return
+        buttons = [[InlineKeyboardButton(label, callback_data=f"pixkey:{i}:{user_id}:{req_id}")]
+                   for i, (label, _key) in enumerate(PIX_KEYS)]
+        await q.answer("Selecciona la llave PIX.")
+        await q.message.reply_text("🔑 Selecciona la llave PIX que deseas enviar:", reply_markup=InlineKeyboardMarkup(buttons))
+        return
+
+    if data.startswith("pixkey:"):
+        if not is_admin(uid) or q.message.chat.type != "private":
+            await q.answer("Solo el administrador puede enviar llaves PIX.", show_alert=True)
+            return
+        try:
+            _, idx, user_text, req_id = data.split(":", 3)
+            user_id = int(user_text)
+            label, key_text = PIX_KEYS[int(idx)]
+        except (ValueError, IndexError):
+            await q.answer("Opción de llave inválida.", show_alert=True)
+            return
+        with db() as con:
+            req = con.execute("SELECT * FROM requests WHERE id=? AND user_id=?", (req_id, user_id)).fetchone()
+        if not req or req["status"] not in {"key_requested", "awaiting_button"}:
+            await q.answer("La solicitud ya no está disponible.", show_alert=True)
+            return
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("💵 Ya realicé el pago", callback_data=f"userpaid:{req_id}")]])
+        key_msg = await context.bot.send_message(user_id, "🔑 LLAVE PIX\n\n" + str(key_text) + "\n\nCuando hayas realizado el pago, pulsa «Ya realicé el pago».", reply_markup=keyboard)
+        with db() as con:
+            con.execute("UPDATE requests SET status='awaiting_user_click',pay_button_at=?,payment_deadline_at=NULL,key_message_id=? WHERE id=? AND user_id=? AND status IN ('key_requested','awaiting_button')", (iso_now(), key_msg.message_id, req_id, user_id))
+        await q.answer(f"Llave {label} enviada.")
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await q.message.reply_text(f"✅ Llave PIX enviada al participante {user_id}.")
+        audit("manual_key_sent", f"Solicitud {req_id}; llave {label}", uid)
         return
 
     if data.startswith("selectraffle:"):
@@ -1825,7 +1817,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     (uid,)
                 ).fetchall()
                 pending = con.execute(
-                    "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','payment_reported','awaiting_payment_receipt','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
+                    "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','awaiting_payment_amount','payment_reported','awaiting_payment_receipt','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
                     (uid,)
                 ).fetchall()
             elif action == "prizes":
@@ -1839,7 +1831,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     (uid,)
                 ).fetchall()
                 pending = con.execute(
-                    "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','payment_reported','awaiting_payment_receipt','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
+                    "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','awaiting_payment_amount','payment_reported','awaiting_payment_receipt','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
                     (uid,)
                 ).fetchall()
             else:
@@ -1886,21 +1878,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if req["status"] != "awaiting_user_click":
                 await q.answer("Este botón ya no está activo.", show_alert=True)
                 return
-            if not req["payment_deadline_at"] or req["payment_deadline_at"] <= iso_now():
-                await q.answer("El plazo terminó y los números serán liberados.", show_alert=True)
-                return
-            con.execute(
-                "UPDATE requests SET status='awaiting_payment_receipt',reported_at=? WHERE id=? AND status='awaiting_user_click'",
-                (iso_now(), req_id)
-            )
-        await q.answer("Ahora debes enviar la captura del pago.", show_alert=True)
+            con.execute("UPDATE requests SET status='awaiting_payment_amount',reported_at=? WHERE id=? AND status='awaiting_user_click'", (iso_now(), req_id))
+        await q.answer("Indica el monto transferido.", show_alert=True)
         await q.edit_message_reply_markup(reply_markup=None)
-        await context.bot.send_message(
-            chat_id=uid,
-            text=("📸 *CAPTURA OBLIGATORIA DEL PAGO*\n\n"
-                  "Para enviar tu pago a revisión, adjunta ahora una foto legible del comprobante de transferencia. "
-                  "El administrador revisará la captura y verificará que el importe y la transferencia coincidan antes de aprobar tus números. "
-                  "No envíes contraseñas, códigos de seguridad ni claves bancarias.") , parse_mode="Markdown")
+        await context.bot.send_message(chat_id=uid, text="💵 MONTO TRANSFERIDO OBLIGATORIO\n\nEscribe el monto exacto que enviaste (por ejemplo: 15,00). Después te pediré la captura.")
         return
 
     if data.startswith("claimpay:"):
@@ -2014,7 +1995,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             "WHERE raffle_id=? AND number=? AND status='pending'",
                             (iso_now(), req["raffle_id"], n)
                         )
-                amount = float(req["total_amount"] or 0) if action == "ok" else 0
+                amount = float(req["reported_amount"] or req["total_amount"] or 0) if action == "ok" else 0
                 con.execute("UPDATE requests SET status=?,processed_at=? WHERE id=?",
                             (status, iso_now(), req_id))
                 con.execute(
@@ -2445,7 +2426,8 @@ async def prize_receipt_photo_handler(update: Update, context: ContextTypes.DEFA
             f"Solicitud: {payment_req['id']}\nLista: {raffle['name'] if raffle else payment_req['raffle_id']}\n"
             f"Participante: {payment_req['name']} (@{payment_req['username'] or 'sin username'})\n"
             f"ID Telegram: {payment_req['user_id']}\nNúmeros: {numbers}\n"
-            f"Importe esperado: {float(payment_req['total_amount'] or 0):.2f} {CURRENCY}\n\n"
+            f"Importe esperado: {float(payment_req['total_amount'] or 0):.2f} {CURRENCY}\n"
+            f"Monto declarado por el usuario: {float(payment_req['reported_amount'] or 0):.2f} {CURRENCY}\n\n"
             "Comprueba en el extracto bancario que la transferencia se haya acreditado y que importe, fecha y referencia coincidan."
         )
         keyboard = InlineKeyboardMarkup([[
@@ -2612,60 +2594,8 @@ async def expire_reservations(app):
             # cuando el administrador la envía manualmente. El temporizador solo
             # controla el plazo posterior a esa entrega.
 
-            # Stage 2: if user did not click within the second 5-minute window, release numbers.
-            with db() as con:
-                expired = con.execute(
-                    "SELECT * FROM requests WHERE status='awaiting_user_click' AND payment_deadline_at<=?",
-                    (now,)
-                ).fetchall()
-            for req in expired:
-                nums = json.loads(req["numbers_json"])
-                async with db_lock:
-                    with db() as con:
-                        con.execute("BEGIN IMMEDIATE")
-                        current = con.execute("SELECT status FROM requests WHERE id=?", (req["id"],)).fetchone()
-                        if not current or current["status"] != "awaiting_user_click":
-                            continue
-                        for n in nums:
-                            con.execute(
-                                "UPDATE numbers SET status='available',user_id=NULL,name='',username='',updated_at=? "
-                                "WHERE raffle_id=? AND number=? AND status='pending' AND user_id=?",
-                                (iso_now(), req["raffle_id"], n, req["user_id"])
-                            )
-                        con.execute(
-                            "UPDATE requests SET status='expired',processed_at=? WHERE id=?",
-                            (iso_now(), req["id"])
-                        )
-                try:
-                    if req["key_message_id"]:
-                        try:
-                            await app.bot.edit_message_reply_markup(
-                                chat_id=req["user_id"], message_id=req["key_message_id"], reply_markup=None
-                            )
-                        except Exception:
-                            log.info("No se pudo retirar el teclado PIX vencido de %s", req["id"])
-                    claim_keyboard = InlineKeyboardMarkup([[
-                        InlineKeyboardButton("💸 Reclamar Pago", callback_data=f"claimpay:{req['id']}")
-                    ]])
-                    name_link = f"[{req['name']}](tg://user?id={req['user_id']})"
-                    expiry_text = (
-                        f"⌛ Tu reserva venció porque no avisaste el pago dentro del plazo. "
-                        f"Se liberaron los números {', '.join(f'{n:02d}' for n in nums)}. "
-                        "La jugada no fue completada. Si realizaste el pago, pulsa «Reclamar Pago» "
-                        "para que el administrador revise tu caso."
-                    )
-                    if req["group_message_id"]:
-                        await app.bot.edit_message_text(
-                            chat_id=req["origin_chat"], message_id=req["group_message_id"],
-                            text=expiry_text, parse_mode="Markdown", reply_markup=claim_keyboard
-                        )
-                    else:
-                        await app.bot.send_message(
-                            req["origin_chat"], expiry_text, parse_mode="Markdown",
-                            reply_markup=claim_keyboard
-                        )
-                except Exception:
-                    log.exception("No se pudo publicar expiración de solicitud %s", req["id"])
+            # La llave y el botón de pago no caducan; no se liberan números por
+            # demorar más de cinco minutos en informar el pago.
         except Exception:
             log.exception("Error en el temporizador de reservas")
         await asyncio.sleep(10)
