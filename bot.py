@@ -808,6 +808,27 @@ async def lists_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(summary, parse_mode="Markdown", reply_markup=keyboard)
 
 
+def build_welcome_message(current_count: int) -> str:
+    """Mensaje oficial de bienvenida, compartido por el chat privado y el canal."""
+    return (
+        "👋 ¡Bienvenido/a, <b>Inversiones Cripto</b>!\n\n"
+        "ℹ️ <b>INFORMACIÓN DEL CANAL Y DE LAS RIFAS</b>\n"
+        "Este canal informa sobre las listas de rifas, números confirmados, resultados y ganadores. Para elegir números y gestionar tus participaciones, utiliza los botones del chat privado del bot. La unión al canal es obligatoria para utilizar el bot.\n\n"
+        "🎟️ <b>¿Cómo funciona?</b>\n"
+        "• Cada lista tiene 100 números, del 01 al 100. Puedes elegir uno o varios números.\n"
+        "• El precio por número puede ser diferente en cada lista. Consulta cada lista para confirmar su precio, premio y disponibilidad.\n"
+        "• Un número no puede reservarse o confirmarse para dos personas. Sigue las instrucciones de pago y espera la confirmación del bot.\n"
+        "• <b>Mientras los 100 números de una lista no estén ocupados y los pagos confirmados, no existe resultado ganador para esa lista.</b> No se anuncia ni se determina un ganador antes de completar esas condiciones.\n"
+        "• Una vez completada la lista, el sorteo se basa en el resultado nocturno de <b>Florida Pick 3</b>. Si se completa antes de las 09:00pm, se utiliza el sorteo nocturno de ese día; si se completa después, se utiliza el de la noche siguiente.\n\n"
+        "🏆 <b>Premio</b>\n"
+        "El premio anunciado para cada lista corresponde entre el 60% – 80% de la recaudación total, según el porcentaje definido para esa lista. Ejemplo: 100 números a R$ 10 generan R$ 1.000 y un premio de R$ 600 a R$ 800, según las condiciones publicadas.\n\n"
+        "🔎 <b>Verificación del resultado</b>\n"
+        "En el menú fijo encontrarás el botón para descargar la aplicación y consultar el resultado de Florida Pick 3.\n\n"
+        f"👥 <b>Participantes actuales:</b> {current_count} usuarios registrados en el bot y miembros del canal. El mínimo de referencia es de 100; el administrador habilita o bloquea las jugadas manualmente.\n\n"
+        "📌 Cada botón del menú principal abre directamente la consulta correspondiente, sin submenús."
+    )
+
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         await update.effective_message.reply_text("Para jugar y consultar tus jugadas, abre el chat privado del bot y pulsa /start.")
@@ -840,23 +861,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await notify_member_count(context, current_count)
 
     if not existing:
-        welcome = (
-            f"👋 ¡Bienvenido/a, {user.first_name or 'participante'}!\n\n"
-            "ℹ️ *INFORMACIÓN DEL CANAL Y DE LAS RIFAS*\n"
-            "Este canal informa sobre las listas de rifas, números confirmados, resultados y ganadores. Para elegir números y gestionar tus participaciones, utiliza los botones del chat privado del bot. La unión al canal es obligatoria para utilizar el bot.\n\n"
-            "🎟️ *¿Cómo funciona?*\n"
-            "• Cada lista tiene 100 números, del 01 al 100. Puedes elegir uno o varios números.\n"
-            "• El precio por número puede ser diferente en cada lista. Consulta cada lista para confirmar su precio, premio y disponibilidad.\n"
-            "• Un número no puede reservarse o confirmarse para dos personas. Sigue las instrucciones de pago y espera la confirmación del bot.\n"
-            "• *Mientras los 100 números de una lista no estén ocupados y los pagos confirmados, no existe resultado ganador para esa lista.* No se anuncia ni se determina un ganador antes de completar esas condiciones.\n"
-            "• Una vez completada la lista, el sorteo se basa en el resultado nocturno de *Florida Pick 3*. Si se completa antes de las 21:00 (hora de Florida), se utiliza el sorteo nocturno de ese día; si se completa después, se utiliza el de la noche siguiente.\n\n"
-            "🏆 *Premio*\n"
-            "El premio anunciado para cada lista corresponde al porcentaje configurado (60%, 65%, 70%, 75% u 80%) de la recaudación total, según el porcentaje definido para esa lista. Ejemplo: 100 números a R$ 10 generan R$ 1.000 y un premio de R$ 700 a R$ 800, según las condiciones publicadas.\n\n"
-            "🔎 *Verificación del resultado*\n"
-            "En el menú fijo encontrarás el botón para descargar la aplicación y consultar Florida Pick 3.\n\n"
-            f"👥 *Participantes actuales:* {current_count} usuarios registrados en el bot y miembros del canal. El mínimo de referencia es 100; el administrador habilita o bloquea las jugadas manualmente.\n\n"
-            "📌 Cada botón del menú principal abre directamente la consulta correspondiente, sin submenús."
-        )
+        welcome = build_welcome_message(current_count)
     else:
         welcome = (
             f"¡Hola de nuevo! Actualmente hay {current_count} usuarios registrados en el bot y miembros del canal. "
@@ -864,7 +869,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Recuerda que no hay resultado ganador hasta que los 100 números de una lista estén ocupados y los pagos confirmados."
         )
     await update.effective_message.reply_text(
-        welcome, parse_mode="Markdown"
+        welcome, parse_mode="HTML"
     )
     await update.effective_message.reply_text(
         "👇 *PANEL PRINCIPAL*\nCada botón muestra directamente su información:",
@@ -3094,18 +3099,7 @@ async def welcome_channel_member(update: Update, context: ContextTypes.DEFAULT_T
 
     if is_now_member and not was_member:
         try:
-            info_text = (
-                f"👋 ¡Bienvenido/a, {html.escape(member.first_name or 'participante')}!\n\n"
-                "ℹ️ INFORMACIÓN\n"
-                "Este canal comparte las listas de rifas, avances, jugadas confirmadas, resultados y ganadores. Para participar, abre el chat privado del bot y pulsa /start; la membresía en este canal es obligatoria para utilizar sus funciones.\n\n"
-                "🎟️ CÓMO FUNCIONAN LAS LISTAS\n"
-                "Cada lista tiene 100 números (01–100). Puedes elegir uno o varios números. El precio por número y el premio pueden cambiar de una lista a otra. Consulta cada lista antes de participar para ver su precio, premio y disponibilidad.\n\n"
-                "🏆 SORTEO Y PREMIO\n"
-                "IMPORTANTE: mientras no estén ocupados los 100 números de una lista y confirmados los pagos correspondientes, no hay resultado ganador para esa lista. Solo cuando se complete se utiliza el resultado nocturno de Florida Pick 3. Si se completa antes de las 21:00 (hora de Florida), se toma el sorteo de esa noche; si se completa después, el de la noche siguiente. El premio será del 70% al 80% de la recaudación, según lo publicado en cada lista.\n\n"
-                "🔎 VERIFICACIÓN\n"
-                "Descarga la aplicación desde el botón del menú privado del bot para consultar Florida Pick 3.\n\n"
-                "👇 Abre el bot y pulsa /start. El mínimo de referencia es 100 usuarios registrados en el bot y miembros del canal; el administrador puede habilitar manualmente las jugadas, incluso antes para realizar pruebas."
-            )
+            info_text = build_welcome_message(after_count)
             await context.bot.send_message(
                 chat_id=CHANNEL_CHAT_ID, text=info_text, parse_mode="HTML"
             )
