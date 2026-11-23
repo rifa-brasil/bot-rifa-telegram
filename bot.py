@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 24
+Bot de rifas Telegram - versión 25
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -705,8 +705,8 @@ def build_user_stats(uid, action):
                 "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','awaiting_payment_amount','payment_reported','awaiting_payment_receipt','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
                 (uid,)
             ).fetchall()
-            blocks = [f"🎟️ {r['raffle_name']} · Números: {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))} · {float(r['amount']):.2f} {CURRENCY} · {r['status']}" for r in rows]
-            blocks += [f"⏳ {r['raffle_name']} · Números: {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))} · {float(r['total_amount'] or 0):.2f} {CURRENCY} · {r['status']}" for r in pending]
+            blocks = [f"🎟️ *Lista:* {r['raffle_name']}\n🔢 *Números jugados:* {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))}\n💰 *Importe:* {float(r['amount']):.2f} {CURRENCY}\n📌 *Estado:* {str(r['status']).upper()}" for r in rows]
+            blocks += [f"⏳ *Lista:* {r['raffle_name']}\n🔢 *Números solicitados:* {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))}\n💰 *Importe:* {float(r['total_amount'] or 0):.2f} {CURRENCY}\n📌 *Estado:* {str(r['status']).upper()}" for r in pending]
             title = "🎟️ *MIS JUGADAS*"
             empty = "Todavía no tienes jugadas registradas."
         elif action == "prizes":
@@ -714,7 +714,7 @@ def build_user_stats(uid, action):
                 "SELECT w.*,r.name AS raffle_name,r.prize,r.prize_value FROM winners w JOIN raffles r ON r.id=w.raffle_id WHERE w.user_id=? ORDER BY w.id DESC LIMIT 30",
                 (uid,)
             ).fetchall()
-            blocks = [f"🏆 {r['raffle_name']} · Número: {int(r['number']):02d}\n💰 Monto ganado: {format_brl(raffle_prize_amount(r))} · {'Recibido' if r['prize_received'] else 'Pendiente de confirmar'}" for r in rows]
+            blocks = [f"🏆 *Lista:* {r['raffle_name']}\n🎯 *Número ganador:* {int(r['number']):02d}\n💰 *Monto del premio:* {format_brl(raffle_prize_amount(r))}\n📌 *Estado:* {'RECIBIDO' if r['prize_received'] else 'PENDIENTE DE CONFIRMACIÓN'}" for r in rows]
             title = "🏆 *MIS PREMIOS*"
             empty = "Todavía no tienes premios registrados."
         elif action == "payments":
@@ -726,8 +726,8 @@ def build_user_stats(uid, action):
                 "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','awaiting_payment_amount','payment_reported','awaiting_payment_receipt','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
                 (uid,)
             ).fetchall()
-            blocks = [f"💳 {r['raffle_name']} · {float(r['amount']):.2f} {CURRENCY} · {r['status']} · {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))}" for r in rows]
-            blocks += [f"⏳ {r['raffle_name']} · {float(r['total_amount'] or 0):.2f} {CURRENCY} · {r['status']} · {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))}" for r in pending]
+            blocks = [f"💳 *Lista:* {r['raffle_name']}\n🔢 *Números:* {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))}\n💰 *Importe:* {float(r['amount']):.2f} {CURRENCY}\n📌 *Estado:* {str(r['status']).upper()}" for r in rows]
+            blocks += [f"⏳ *Lista:* {r['raffle_name']}\n🔢 *Números:* {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))}\n💰 *Importe:* {float(r['total_amount'] or 0):.2f} {CURRENCY}\n📌 *Estado:* {str(r['status']).upper()}" for r in pending]
             title = "💳 *HISTORIAL DE PAGOS*"
             empty = "Todavía no hay pagos ni solicitudes registrados."
         else:
@@ -737,8 +737,8 @@ def build_user_stats(uid, action):
             results = con.execute(
                 "SELECT draw_date,draw_type,result,fireball FROM lottery_results ORDER BY draw_date DESC,fetched_at DESC LIMIT 10"
             ).fetchall()
-            blocks = [f"🏆 {r['raffle_name']} · Número ganador: {int(r['number']):02d} · Premio: {r['prize'] or 'Premio entregado mediante transferencia PIX'} · {'Comprobante publicado' if r['prize_received'] else 'Entrega pendiente'}" for r in rows]
-            blocks += [f"🎯 Florida Pick 3 · {r['draw_date']} · {'Mediodía' if r['draw_type']=='M' else 'Noche'}: {r['result']}" for r in results]
+            blocks = [f"🏆 *GANADOR*\n🎟️ *Lista:* {r['raffle_name']}\n🎯 *Número ganador:* {int(r['number']):02d}\n💰 *Premio:* {r['prize'] or 'Premio entregado mediante transferencia PIX'}\n📌 *Estado:* {'COMPROBANTE PUBLICADO' if r['prize_received'] else 'ENTREGA PENDIENTE'}" for r in rows]
+            blocks += [f"🎯 *FLORIDA PICK 3*\n📅 *Fecha:* {r['draw_date']}\n🕒 *Sorteo:* {'Mediodía' if r['draw_type']=='M' else 'Noche'}\n🔢 *Resultado:* {r['result']}" for r in results]
             title = "📚 *RESULTADOS Y GANADORES*"
             empty = "Todavía no hay resultados publicados."
     return title, "\n\n".join(blocks) if blocks else empty
@@ -855,12 +855,17 @@ async def lists_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for index, raffle in enumerate(raffles, 1):
         st = stats(raffle["id"])
         summary = (
-            f"🎟️ *{raffle['name']}* (Lista #{index})\n"
-            f"🔢 Números: {raffle['total_numbers']} · 💵 Por número: {float(raffle['price']):.2f} {CURRENCY}\n"
-            f"🏆 Premio: {raffle['prize'] or 'Por anunciar'}\n"
-            f"💎 Valor del premio: {raffle.get('prize_value') or 'Por definir'}\n"
-            f"📊 Progreso: {progress_bar(st['occupied'] + st['pending'], st['total'])} ({st['occupied'] + st['pending']}/{st['total']})\n"
-            f"🟢 Libres: {st['available']} · 🔴 Ocupados: {st['occupied']} · 🟡 Pendientes: {st['pending']}"
+            f"🎟️ *{raffle['name']}* (Lista #{index})\n\n"
+            f"🔢 *Número total:* {st['total']}\n"
+            f"💵 *Valor por número:* {float(raffle['price']):.2f} {CURRENCY}\n"
+            f"🏆 *Premio:* {raffle['prize'] or 'Por anunciar'}\n"
+            f"💎 *Valor del premio:* {raffle.get('prize_value') or 'Por definir'}\n"
+            f"🔴 *Números ocupados:* {st['occupied']}\n"
+            f"🟡 *Números pendientes:* {st['pending']}\n"
+            f"🟢 *Números libres:* {st['available']}\n"
+            f"💰 *Total recaudado:* {st['revenue']:.2f} {CURRENCY}\n"
+            f"📊 *Progreso:* {progress_bar(st['occupied'] + st['pending'], st['total'])}\n"
+            f"📌 *Estado:* {raffle.get('status', 'active').upper()}"
         )
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(f"🎟️ Jugar en {raffle['name']}", callback_data=f"selectraffle:{raffle['id']}")]])
         await update.effective_message.reply_text(summary, parse_mode="Markdown", reply_markup=keyboard)
@@ -1283,11 +1288,18 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             for item in rows:
                 st = stats(item["id"])
                 blocks.append(
-                    f"🎟️ *{item['name']}* (#{item['id']})\n"
-                    f"Números: {st['total']} · Precio: {st['price']:.2f} {CURRENCY}\n"
-                    f"Premio: {item['prize'] or 'Por anunciar'} · Valor: {item.get('prize_value') or 'Por definir'}\n"
-                    f"Ocupados: {st['occupied']} · Pendientes: {st['pending']} · Libres: {st['available']}\n"
-                    f"Recaudado: {st['revenue']:.2f} {CURRENCY} · Grupo: {item['group_id']}"
+                    f"🎟️ *{item['name']}* (#{item['id']})\n\n"
+                    f"🔢 *Número total:* {st['total']}\n"
+                    f"💵 *Valor por número:* {st['price']:.2f} {CURRENCY}\n"
+                    f"🏆 *Premio:* {item['prize'] or 'Por anunciar'}\n"
+                    f"💎 *Valor del premio:* {item.get('prize_value') or 'Por definir'}\n"
+                    f"🔴 *Números ocupados:* {st['occupied']}\n"
+                    f"🟡 *Números pendientes:* {st['pending']}\n"
+                    f"🟢 *Números libres:* {st['available']}\n"
+                    f"💰 *Total recaudado:* {st['revenue']:.2f} {CURRENCY}\n"
+                    f"📊 *Progreso:* {progress_bar(st['occupied'] + st['pending'], st['total'])}\n"
+                    f"📌 *Estado:* {item['status'].upper()}\n"
+                    f"👥 *Grupo:* {item['group_id']}"
                 )
             result = "📋 *LISTAS ACTIVAS*\n\n" + "\n\n".join(blocks)
         await msg.reply_text(result, parse_mode="Markdown", reply_markup=admin_keyboard())
@@ -2078,17 +2090,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             body = "\n\n".join(blocks) if blocks else "Todavía no tienes jugadas registradas."
             title = "🎟️ *MIS JUGADAS*"
         elif action == "prizes":
-            blocks = [f"🏆 {r['raffle_name']} · Número: {int(r['number']):02d}\n💰 Monto ganado: {format_brl(raffle_prize_amount(r))} · {'Recibido' if r['prize_received'] else 'Pendiente de confirmar'}" for r in rows]
+            blocks = [f"🏆 *Lista:* {r['raffle_name']}\n🎯 *Número ganador:* {int(r['number']):02d}\n💰 *Monto del premio:* {format_brl(raffle_prize_amount(r))}\n📌 *Estado:* {'RECIBIDO' if r['prize_received'] else 'PENDIENTE DE CONFIRMACIÓN'}" for r in rows]
             body = "\n\n".join(blocks) if blocks else "Todavía no tienes premios registrados."
             title = "🏆 *MIS PREMIOS*"
         elif action == "payments":
-            blocks = [f"💳 {r['raffle_name']} · {float(r['amount']):.2f} {CURRENCY} · {r['status']} · {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))}" for r in rows]
-            blocks += [f"⏳ {r['raffle_name']} · {float(r['total_amount'] or 0):.2f} {CURRENCY} · {r['status']} · {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))}" for r in pending]
+            blocks = [f"💳 *Lista:* {r['raffle_name']}\n🔢 *Números:* {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))}\n💰 *Importe:* {float(r['amount']):.2f} {CURRENCY}\n📌 *Estado:* {str(r['status']).upper()}" for r in rows]
+            blocks += [f"⏳ *Lista:* {r['raffle_name']}\n🔢 *Números:* {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))}\n💰 *Importe:* {float(r['total_amount'] or 0):.2f} {CURRENCY}\n📌 *Estado:* {str(r['status']).upper()}" for r in pending]
             body = "\n\n".join(blocks) if blocks else "Todavía no hay pagos ni solicitudes registrados."
             title = "💳 *HISTORIAL DE PAGOS*"
         else:
-            blocks = [f"🏆 {r['raffle_name']} · Número ganador: {int(r['number']):02d} · Premio: {r['prize'] or 'Premio entregado mediante transferencia PIX'} · {'Comprobante publicado' if r['prize_received'] else 'Entrega pendiente'}" for r in rows]
-            blocks += [f"🎯 Florida Pick 3 · {r['draw_date']} · {'Mediodía' if r['draw_type']=='M' else 'Noche'}: {r['result']}" for r in results]
+            blocks = [f"🏆 *GANADOR*\n🎟️ *Lista:* {r['raffle_name']}\n🎯 *Número ganador:* {int(r['number']):02d}\n💰 *Premio:* {r['prize'] or 'Premio entregado mediante transferencia PIX'}\n📌 *Estado:* {'COMPROBANTE PUBLICADO' if r['prize_received'] else 'ENTREGA PENDIENTE'}" for r in rows]
+            blocks += [f"🎯 *FLORIDA PICK 3*\n📅 *Fecha:* {r['draw_date']}\n🕒 *Sorteo:* {'Mediodía' if r['draw_type']=='M' else 'Noche'}\n🔢 *Resultado:* {r['result']}" for r in results]
             body = "\n\n".join(blocks) if blocks else "Todavía no hay resultados publicados."
             title = "📚 *RESULTADOS Y GANADORES*"
         await q.answer()
@@ -2499,11 +2511,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for item in rows:
                     st = stats(item["id"])
                     blocks.append(
-                        f"🎟️ *{item['name']}* (#{item['id']})\n"
-                        f"Números: {st['total']} · Precio: {st['price']:.2f} {CURRENCY}\n"
-                        f"Premio: {item['prize'] or 'Por anunciar'} · Valor: {item.get('prize_value') or 'Por definir'}\n"
-                        f"Ocupados: {st['occupied']} · Pendientes: {st['pending']} · Libres: {st['available']}\n"
-                        f"Recaudado: {st['revenue']:.2f} {CURRENCY} · Grupo: {item['group_id']}"
+                        f"🎟️ *{item['name']}* (#{item['id']})\n\n"
+                        f"🔢 *Número total:* {st['total']}\n"
+                        f"💵 *Valor por número:* {st['price']:.2f} {CURRENCY}\n"
+                        f"🏆 *Premio:* {item['prize'] or 'Por anunciar'}\n"
+                        f"💎 *Valor del premio:* {item.get('prize_value') or 'Por definir'}\n"
+                        f"🔴 *Números ocupados:* {st['occupied']}\n"
+                        f"🟡 *Números pendientes:* {st['pending']}\n"
+                        f"🟢 *Números libres:* {st['available']}\n"
+                        f"💰 *Total recaudado:* {st['revenue']:.2f} {CURRENCY}\n"
+                        f"📊 *Progreso:* {progress_bar(st['occupied'] + st['pending'], st['total'])}\n"
+                        f"📌 *Estado:* {item['status'].upper()}\n"
+                        f"👥 *Grupo:* {item['group_id']}"
                     )
                 text = "📋 *LISTAS ACTIVAS*\n\n" + "\n\n".join(blocks)
             await q.message.reply_text(text, parse_mode="Markdown", reply_markup=admin_back_keyboard())
@@ -2648,11 +2667,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await q.answer()
         await q.message.reply_text(
-            f"📊 *{st['name']} (#{raffle_id})*\nEstado: {st['status']}\n"
-            f"Total de números: {st['total']}\nOcupados: {st['occupied']}\nPendientes: {st['pending']}\n"
-            f"Libres: {st['available']}\nPrecio por número: {st['price']:.2f} {CURRENCY}\n"
-            f"Recaudado (pagos aprobados): {st['revenue']:.2f} {CURRENCY}\n"
-            f"Premio: {raffle['prize'] or 'Por anunciar'}\nValor del premio: {raffle.get('prize_value') or 'Por definir'}",
+            f"📊 *ESTADÍSTICAS · {st['name']} (#{raffle_id})*\n\n"
+            f"🔢 *Número total:* {st['total']}\n"
+            f"💵 *Valor por número:* {st['price']:.2f} {CURRENCY}\n"
+            f"🏆 *Premio:* {raffle['prize'] or 'Por anunciar'}\n"
+            f"💎 *Valor del premio:* {raffle.get('prize_value') or 'Por definir'}\n"
+            f"🔴 *Números ocupados:* {st['occupied']}\n"
+            f"🟡 *Números pendientes:* {st['pending']}\n"
+            f"🟢 *Números libres:* {st['available']}\n"
+            f"💰 *Total recaudado (pagos aprobados):* {st['revenue']:.2f} {CURRENCY}\n"
+            f"📊 *Progreso:* {progress_bar(st['occupied'] + st['pending'], st['total'])}\n"
+            f"📌 *Estado:* {st['status'].upper()}\n"
+            f"👥 *Grupo:* {st['group_id']}",
             parse_mode="Markdown", reply_markup=admin_back_keyboard()
         )
         return
