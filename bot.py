@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 9
+Bot de rifas Telegram - versión 11
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -221,6 +221,15 @@ def init_db():
         ]:
             if col not in winner_columns:
                 con.execute(f"ALTER TABLE winners ADD COLUMN {col} {declaration}")
+        # Flujo de entrega del premio: solicitud, llave PIX y comprobante de transferencia.
+        winner_columns = {r[1] for r in con.execute("PRAGMA table_info(winners)")}
+        for col, declaration in [
+            ("prize_status", "TEXT NOT NULL DEFAULT 'announced'"),
+            ("pix_key", "TEXT DEFAULT ''"),
+            ("payout_receipt_file_id", "TEXT DEFAULT ''")
+        ]:
+            if col not in winner_columns:
+                con.execute(f"ALTER TABLE winners ADD COLUMN {col} {declaration}")
         # Migraciones compatibles con bases de datos creadas por versiones anteriores.
         raffle_columns = {r[1] for r in con.execute("PRAGMA table_info(raffles)")}
         if "prize_value" not in raffle_columns:
@@ -364,7 +373,7 @@ def set_playing_enabled(enabled):
 def participant_progress_label():
     """Muestra el total general de usuarios elegibles, sin barra ni límite máximo."""
     count = eligible_user_count()
-    return f"👥 Cantidad de usuarios (mínimo 100): {count} usuarios registrados"
+    return f"👥 Contador de Usuarios · {count} registrados"
 
 
 def play_status_text():
@@ -373,136 +382,39 @@ def play_status_text():
 
 
 async def notify_member_count(context, count):
-    """Informa al administrador y a usuarios registrados cada alta elegible."""
-    enabled = is_playing_enabled()
-    status = 'habilitadas' if enabled else 'bloqueadas por el administrador'
-    text = f"👥 Actualización de participantes: {count} usuarios registrados en el bot y miembros del canal.\n🎟️ Las jugadas están {status}."
-    try:
-        await context.bot.send_message(ADMIN_ID, text + ("\n\n✅ Ya se alcanzó el mínimo de 100. Puedes habilitar las jugadas desde tu panel." if count >= 100 and not enabled else ""), reply_markup=admin_keyboard())
-    except Exception:
-        log.exception("No se pudo notificar al administrador el contador de miembros")
-    with db() as con:
-        ids = [int(r[0]) for r in con.execute("SELECT user_id FROM bot_users WHERE channel_member=1").fetchall()]
-    for user_id in ids:
+    """Actualiza el contador y alerta al llegar al mínimo de 100; el admin habilita manualmente."""
+    if count < 100:
         try:
-            await context.bot.send_message(user_id, text, reply_markup=user_keyboard())
+            await context.bot.send_message(
+                ADMIN_ID,
+                f"👥 Contador de Usuarios: {count} registrados.\nFaltan {100-count} para llegar al mínimo de 100 y poder desbloquear las jugadas.",
+                reply_markup=admin_keyboard()
+            )
         except Exception:
-            log.debug("No se pudo enviar contador al usuario %s", user_id, exc_info=True)
-        await asyncio.sleep(0.04)
+            log.exception("No se pudo actualizar el contador del administrador")
+        return
 
-
-async def refresh_raffle_progress_messages(context, raffle_id):
-    """Actualiza los mensajes de disponibilidad que cada usuario abrió para esta lista."""
     with db() as con:
-        targets = con.execute("SELECT user_id,chat_id,message_id FROM raffle_progress_messages WHERE raffle_id=?", (raffle_id,)).fetchall()
-    body = list_text(raffle_id)
-    for target in targets:
-        try:
-            await context.bot.edit_message_text(chat_id=target['chat_id'], message_id=target['message_id'],
-                                                text=body, parse_mode='Markdown')
-        except Exception:
-            log.debug("No se pudo actualizar progreso para usuario %s", target['user_id'], exc_info=True)
-
-
-def list_text(raffle_id):
-    with db() as con:
-        r = con.execute("SELECT * FROM raffles WHERE id=?", (raffle_id,)).fetchone()
-        rows = con.execute(
-            "SELECT * FROM numbers WHERE raffle_id=? ORDER BY number", (raffle_id,)
-        ).fetchall()
-    if not r:
-        return "No existe esa rifa."
-    s = stats(raffle_id)
-    lines = [
-        f"🎟️ *{r['name']}* (Lista #{raffle_id})",
-        f"💵 Valor por número: *{float(r['price']):.2f} {CURRENCY}*",
-        f"🏆 Premio: *{r['prize'] or 'Premio entregado mediante transferencia PIX'}*",
-        f"💎 Valor del premio: *{r['prize_value'] or 'Por definir'}*",
-        f"🔢 Cantidad de números: *{r['total_numbers']}*",
-        ""
-    ]
-    for row in rows:
-        n = int(row["number"])
-        tag = f"{n:02d}" if r["total_numbers"] <= 100 else str(n)
-        if row["status"] == "available":
-            lines.append(f"🟢 *{tag}*: Disponible")
-        elif row["status"] == "pending":
-            lines.append(f"🟡 *{tag}*: En verificación")
-        else:
-            name = row["name"] or "Participante"
-            uid = row["user_id"]
-            mention = f"[{name}](tg://user?id={uid})" if uid else name
-            lines.append(f"🔴 *{tag}*: {mention}")
-    lines += [
-        "", f"📊 Progreso: `{progress_bar(s['occupied'] + s['pending'], s['total'])}` *{s['occupied'] + s['pending']}/{s['total']}* (ocupados + pendientes)",
-        f"🟢 Disponibles: *{s['available']}* | 🟡 Pendientes: *{s['pending']}*",
-        f"💰 Recaudado (pagos aprobados): *{s['revenue']:.2f} {CURRENCY}*",
-        f"Estado: *{s['status']}*"
-    ]
-    return "\n".join(lines)
-
-
-async def send_private(user_id, text):
-    """Envía desde la cuenta dedicada si está conectada; nunca finge ser el admin."""
-    if not user_client:
-        log.warning("Cuenta dedicada no conectada; no se envió DM a %s", user_id)
-        return False
+        already_notified = con.execute(
+            "SELECT setting_value FROM bot_settings WHERE setting_key='minimum100_notified'"
+        ).fetchone()
+        if already_notified and already_notified[0] == '1':
+            return
+        con.execute(
+            "INSERT INTO bot_settings(setting_key,setting_value) VALUES('minimum100_notified','1') "
+            "ON CONFLICT(setting_key) DO UPDATE SET setting_value='1'"
+        )
     try:
-        await user_client.send_message(int(user_id), text)
-        return True
+        await context.bot.send_message(
+            ADMIN_ID,
+            "🎉 ¡SE ALCANZÓ EL MÍNIMO DE 100 USUARIOS!\n\n"
+            "Ya puedes pulsar «🔓 Desbloquear jugadas» desde tu panel. "
+            "Los usuarios recibirán el aviso de que las jugadas están habilitadas cuando confirmes el desbloqueo.",
+            reply_markup=admin_keyboard()
+        )
     except Exception:
-        log.exception("No se pudo enviar DM desde la cuenta dedicada a %s", user_id)
-        return False
-
-
-async def start_web_server():
-    async def health(_request):
-        return web.Response(text="Bot de rifas activo")
-    app = web.Application()
-    app.router.add_get("/", health)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    log.info("Servidor web activo en puerto %s", PORT)
-
-
-ADMIN_MENU_ACTIONS = {
-    "➕ Crear lista": "create",
-    "📋 Listas activas": "active",
-    "📊 Estadísticas": "stats",
-    "🏆 Indicar Número Ganador": "winner",
-    "🔄 Resetear lista": "reset",
-    "🗑️ Borrar lista": "delete",
-    "💾 Crear respaldo": "backup",
-    "♻️ Restaurar respaldo": "restore",
-    "👥 Historial": "history",
-    "👥 Usuarios actuales": "users",
-    "🔒 Bloquear jugadas": "block",
-    "🔓 Desbloquear jugadas": "unblock",
-    "🚫 Bloquear usuario": "block_user",
-    "✅ Desbloquear usuario": "unblock_user",
-    "🔄 Actualizar panel": "back",
-}
-
-def channel_join_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 Unirme al canal", url=CHANNEL_JOIN_URL)],
-        [InlineKeyboardButton("✅ Ya me uní · Verificar", callback_data="channel:check")]
-    ])
-
-
-def florida_links_keyboard():
-    """El usuario pidió un único acceso: descargar la app para consultar Florida Pick 3."""
-    return InlineKeyboardMarkup([[InlineKeyboardButton("📲 Descargar aplicación", url=DOWNLOAD_APP_URL)]])
-
-
-def eligible_user_count():
-    """Usuarios que iniciaron el bot y cuya membresía actual en el canal fue verificada."""
-    with db() as con:
-        return int(con.execute(
-            "SELECT COUNT(*) FROM bot_users WHERE channel_member=1"
-        ).fetchone()[0])
+        log.exception("No se pudo avisar al administrador al alcanzar 100 usuarios")
+    await notify_threshold_reached(context, count)
 
 
 async def notify_user_ready(context, user_id, count):
@@ -510,11 +422,10 @@ async def notify_user_ready(context, user_id, count):
         await context.bot.send_message(
             chat_id=int(user_id),
             text=(
-                "🎉 ¡YA PUEDES PARTICIPAR!\n\n"
-                f"La comunidad alcanzó {count} usuarios registrados en el bot y miembros del canal. "
-                "Desde ahora puedes abrir «Ver listas activas», consultar la disponibilidad y escoger "
-                "los números que desees. Recuerda: no hay resultado ganador hasta que los 100 números "
-                "de la lista estén ocupados y los pagos correspondientes confirmados."
+                "🎉 ¡YA SE ALCANZÓ EL MÍNIMO DE 100 USUARIOS!\n\n"
+                f"La comunidad tiene {count} usuarios registrados en el bot y miembros del canal. "
+                "El administrador recibió el aviso para desbloquear las jugadas. Te notificaremos cuando "
+                "las habilite; mientras tanto puedes consultar las listas y su disponibilidad."
             ),
             reply_markup=user_keyboard()
         )
@@ -748,6 +659,14 @@ def raffle_price_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"R$ {v}", callback_data=f"createprice:{v}") for v in values[i:i+3]]
         for i in range(0, len(values), 3)
+    ])
+
+
+def raffle_name_keyboard():
+    """Opciones de nombres predefinidos para crear una lista con un toque."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"Lista {n}", callback_data=f"createlistname:{n}")]
+        for n in range(1, 6)
     ])
 
 
@@ -994,6 +913,27 @@ async def new_raffle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def verify_winner_ownership(con, winner):
+    """Revalida que el ganador conserva el número y que existe una compra aprobada."""
+    number_row = con.execute(
+        "SELECT user_id,status FROM numbers WHERE raffle_id=? AND number=?",
+        (winner["raffle_id"], winner["number"])
+    ).fetchone()
+    if not number_row or number_row["status"] != "occupied" or number_row["user_id"] != winner["user_id"]:
+        return False
+    purchases = con.execute(
+        "SELECT numbers_json FROM purchases WHERE raffle_id=? AND user_id=? AND status='approved'",
+        (winner["raffle_id"], winner["user_id"])
+    ).fetchall()
+    for purchase in purchases:
+        try:
+            if int(winner["number"]) in [int(n) for n in json.loads(purchase["numbers_json"])]:
+                return True
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return False
+
+
 async def publish_winner(update, context, raffle_id, number):
     raffle = get_raffle(raffle_id)
     if not raffle or not 1 <= number <= raffle["total_numbers"]:
@@ -1016,17 +956,17 @@ async def publish_winner(update, context, raffle_id, number):
         )
         winner_id = cur.lastrowid
         con.execute("UPDATE raffles SET status='finished',closed_at=? WHERE id=?", (iso_now(), raffle_id))
-    mention = f"[{row['name']}](tg://user?id={row['user_id']})" if row["user_id"] else row["name"]
     msg = (
-        f"🏆 *¡RESULTADO OFICIAL DE LA RIFA!* 🏆\n\n"
-        f"🎟️ Lista: *{raffle['name']}*\n🎯 Número ganador: *{number:02d}*\n"
-        f"🎉 Ganador: {mention}\n\nCuando recibas tu premio, pulsa el botón *Premio Recibido*."
+        f"🎉 ¡FELICIDADES, {row['name']}! 🎉\n\n"
+        f"🏆 Has sido el ganador del sorteo de la *{raffle['name']}*.\n"
+        f"🎯 Número ganador: *{number:02d}*.\n\n"
+        "Para recibir tu premio, solicita la entrega al administrador pulsando el botón de abajo."
     )
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏆 Premio Recibido", callback_data=f"prize:{winner_id}")]])
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🎁 Solicitar Premio al Administrador", callback_data=f"prizerequest:{winner_id}")]])
     try:
         sent = await context.bot.send_message(chat_id=row["user_id"], text=msg, parse_mode="Markdown", reply_markup=keyboard)
         with db() as con:
-            con.execute("UPDATE winners SET group_message_id=? WHERE id=?", (sent.message_id, winner_id))
+            con.execute("UPDATE winners SET group_message_id=?,prize_status='announced' WHERE id=?", (sent.message_id, winner_id))
     except Exception:
         log.exception("No se pudo enviar el resultado al ganador en privado")
         await update.effective_message.reply_text("El ganador quedó registrado, pero no pude enviarle el mensaje privado. El usuario debe iniciar el bot con /start.")
@@ -1034,14 +974,13 @@ async def publish_winner(update, context, raffle_id, number):
     if CHANNEL_CHAT_ID:
         try:
             channel_msg = await context.bot.send_message(
-                chat_id=CHANNEL_CHAT_ID, text=
-                f"🏆 <b>RESULTADO DE LA RIFA</b>\n\n"
-                f"🎟️ Lista: <b>{html.escape(raffle['name'])}</b>\n"
-                f"🎯 Número ganador: <b>{number:02d}</b>\n"
-                f"👤 Usuario ganador: <a href=\"tg://user?id={row['user_id']}\">{html.escape(row['name'])}</a>\n\n"
-                "Cuando reciba el premio, el ganador debe pulsar «Recibí el Premio» y enviar el comprobante.",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏆 Recibí el Premio", callback_data=f"prize:{winner_id}")]])
+                chat_id=CHANNEL_CHAT_ID, text=(
+                    f"🏆 <b>RESULTADO DE LA RIFA</b>\n\n"
+                    f"🎟️ Lista: <b>{html.escape(raffle['name'])}</b>\n"
+                    f"🎯 Número ganador: <b>{number:02d}</b>\n"
+                    f"👤 Usuario ganador: <a href=\"tg://user?id={row['user_id']}\">{html.escape(row['name'])}</a>\n\n"
+                    "El ganador recibirá las instrucciones para solicitar su premio por mensaje privado."
+                ), parse_mode="HTML"
             )
             with db() as con:
                 con.execute("UPDATE winners SET channel_message_id=? WHERE id=?", (channel_msg.message_id, winner_id))
@@ -1138,12 +1077,32 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     if action == "unblock":
         count = eligible_user_count()
         set_playing_enabled(True)
-        await msg.reply_text(f"🔓 ¡Jugadas DESBLOQUEADAS por el administrador! Ya se puede probar incluso con {count} usuario(s) registrado(s), siempre que no tengan bloqueo individual.\n\n" + play_status_text(), reply_markup=admin_keyboard())
+        threshold_text = (
+            "✅ Ya se alcanzó el mínimo de 100 usuarios registrados."
+            if count >= 100 else
+            f"⚠️ Actualmente hay {count} usuarios registrados; todavía no se alcanzó el mínimo de 100."
+        )
+        await msg.reply_text(
+            f"🔓 ¡Jugadas DESBLOQUEADAS por el administrador!\n{threshold_text}\n\n" + play_status_text(),
+            reply_markup=admin_keyboard()
+        )
         with db() as con:
             ids = [int(r[0]) for r in con.execute("SELECT user_id FROM bot_users WHERE channel_member=1 AND playing_blocked=0").fetchall()]
         for user_id in ids:
             try:
-                await context.bot.send_message(user_id, "🎉 ¡EL ADMINISTRADOR HABILITÓ LAS JUGADAS! Ya puedes entrar en «Ver listas activas» y escoger tus números, salvo que tengas un bloqueo individual.", reply_markup=user_keyboard())
+                if count >= 100:
+                    user_notice = (
+                        "🎉 ¡YA HAY 100 USUARIOS MÍNIMOS!\n\n"
+                        "✅ El administrador ya desbloqueó las jugadas. Ya puedes entrar en «Ver listas activas» "
+                        "y escoger tus números, salvo que tengas un bloqueo individual."
+                    )
+                else:
+                    user_notice = (
+                        f"🔓 El administrador desbloqueó las jugadas. Actualmente hay {count} usuarios registrados; "
+                        "el mínimo de 100 todavía no se alcanzó. Puedes participar mientras las jugadas estén habilitadas, "
+                        "salvo que tengas un bloqueo individual."
+                    )
+                await context.bot.send_message(user_id, user_notice, reply_markup=user_keyboard())
             except Exception:
                 pass
         audit("playing_unblocked", f"Jugadas habilitadas con {count} usuarios elegibles", update.effective_user.id)
@@ -1173,7 +1132,7 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
     if action == "create":
         context.user_data["admin_flow"] = {"kind": "create", "step": "name"}
-        await msg.reply_text(admin_flow_prompt("name"), parse_mode="Markdown", reply_markup=admin_keyboard())
+        await msg.reply_text(admin_flow_prompt("name"), parse_mode="Markdown", reply_markup=raffle_name_keyboard())
     elif action == "active":
         with db() as con:
             rows = [dict(r) for r in con.execute(
@@ -1265,6 +1224,52 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = msg.text.strip()
 
+    # Llave PIX del ganador: solo se acepta del usuario propietario de la solicitud vigente.
+    if update.effective_chat.type == "private" and not is_admin(update.effective_user.id):
+        with db() as con:
+            winner = con.execute(
+                "SELECT * FROM winners WHERE user_id=? AND prize_status='pix_input_pending' AND prize_received=0 ORDER BY id DESC LIMIT 1",
+                (update.effective_user.id,)
+            ).fetchone()
+        pix_winner_id = winner["id"] if winner else None
+    else:
+        winner = None
+        pix_winner_id = None
+    if pix_winner_id:
+        pix_key = text.strip()
+        if len(pix_key) < 3 or len(pix_key) > 200:
+            await msg.reply_text("La llave PIX no parece válida. Envíala nuevamente (máximo 200 caracteres).")
+            return
+        raffle = get_raffle(winner["raffle_id"])
+        try:
+            with db() as con:
+                con.execute("UPDATE winners SET pix_key=?,prize_status='pix_received' WHERE id=? AND user_id=? AND prize_status='pix_input_pending'",
+                            (pix_key, winner["id"], update.effective_user.id))
+            copy_row = []
+            try:
+                from telegram import CopyTextButton
+                copy_row.append([InlineKeyboardButton(text="📋 Copiar llave PIX", copy_text=CopyTextButton(text=pix_key))])
+            except (ImportError, TypeError):
+                pass
+            copy_row.append([InlineKeyboardButton("💸 Premio enviado", callback_data=f"prizepaid:{winner['id']}")])
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=("🔑 <b>LLAVE PIX RECIBIDA · PREMIO</b>\n\n"
+                      f"Lista: <b>{html.escape(raffle['name'] if raffle else str(winner['raffle_id']))}</b>\n"
+                      f"Ganador: <b>{html.escape(winner['name'])}</b>\n"
+                      f"ID Telegram: <code>{winner['user_id']}</code>\n"
+                      f"Número ganador: <b>{int(winner['number']):02d}</b>\n\n"
+                      f"Llave PIX: <code>{html.escape(pix_key)}</code>\n\n"
+                      "Usa el botón para copiar la llave. Cuando completes la transferencia, pulsa «Premio enviado» y adjunta la captura."),
+                parse_mode="HTML", reply_markup=InlineKeyboardMarkup(copy_row)
+            )
+            await msg.reply_text("✅ Tu llave PIX fue enviada al administrador. Te avisaremos cuando se realice la transferencia.")
+            audit("winner_pix_received", f"Ganador #{winner['id']} recibió llave PIX", update.effective_user.id)
+        except Exception:
+            log.exception("No se pudo procesar o enviar la llave PIX del ganador")
+            await msg.reply_text("No pude enviar la llave PIX al administrador. Inténtalo nuevamente.")
+        return
+
     # Las participaciones se gestionan exclusivamente en el chat privado del bot.
     if update.effective_chat.type != "private":
         if not is_admin(update.effective_user.id):
@@ -1308,19 +1313,29 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with db() as con:
             amount_req = con.execute("SELECT * FROM requests WHERE user_id=? AND status='awaiting_payment_amount' ORDER BY created_at DESC LIMIT 1", (update.effective_user.id,)).fetchone()
         if amount_req:
-            normalized = text.strip().replace("R$", "").replace(" ", "")
+            normalized = text.strip().upper().replace("R$", "").replace("BRL", "").replace("$", "").replace(" ", "")
             if "," in normalized:
                 normalized = normalized.replace(".", "").replace(",", ".")
             try:
-                declared = float(Decimal(normalized).quantize(Decimal("0.01")))
-                if declared <= 0:
+                declared_decimal = Decimal(normalized).quantize(Decimal("0.01"))
+                if declared_decimal <= 0:
                     raise InvalidOperation
             except (InvalidOperation, ValueError):
-                await msg.reply_text("❌ Monto inválido. Escribe un valor mayor que cero, por ejemplo: 15,00.")
+                await msg.reply_text("❌ Monto inválido. Escribe el monto exacto, por ejemplo: 40,00.")
                 return
+            expected = Decimal(str(amount_req["total_amount"] or 0)).quantize(Decimal("0.01"))
+            if declared_decimal != expected:
+                expected_fmt = f"{expected:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                await msg.reply_text(
+                    f"❌ Monto incorrecto. Según los números que seleccionaste, debes transferir *{CURRENCY} {expected_fmt}*. "
+                    f"Ingresaste *{CURRENCY} {declared_decimal:.2f}*.\n\nVuelve a escribir el monto correcto para continuar.",
+                    parse_mode="Markdown"
+                )
+                return
+            declared = float(declared_decimal)
             with db() as con:
                 con.execute("UPDATE requests SET reported_amount=?,status='awaiting_payment_receipt' WHERE id=? AND status='awaiting_payment_amount'", (declared, amount_req["id"]))
-            await msg.reply_text(f"✅ Monto registrado: {declared:.2f} {CURRENCY}.\n\n📸 Ahora adjunta obligatoriamente la captura de la transferencia en este chat privado.")
+            await msg.reply_text(f"✅ Monto correcto registrado: {declared:.2f} {CURRENCY}.\n\n📸 Ahora adjunta obligatoriamente la captura de la transferencia en este chat privado.")
             return
 
     # Respuesta directa a una consulta de soporte; el botón identifica al remitente exacto.
@@ -1556,6 +1571,37 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data or ""
     uid = q.from_user.id
 
+    if data.startswith("createlistname:"):
+        if not is_admin(uid) or q.message.chat.type != "private":
+            await q.answer("Solo el administrador puede crear listas.", show_alert=True)
+            return
+        flow = context.user_data.get("admin_flow") or {}
+        if flow.get("kind") != "create" or flow.get("step") != "name":
+            await q.answer("El formulario expiró. Inicia de nuevo desde Crear lista.", show_alert=True)
+            return
+        try:
+            index = int(data.split(":", 1)[1])
+            if index not in range(1, 6):
+                raise ValueError
+        except ValueError:
+            await q.answer("Nombre de lista inválido.", show_alert=True)
+            return
+        name = f"Lista {index}"
+        with db() as con:
+            duplicate = con.execute("SELECT 1 FROM raffles WHERE lower(trim(name))=lower(trim(?))", (name,)).fetchone()
+        if duplicate:
+            await q.answer(f"{name} ya existe. Selecciona otro nombre.", show_alert=True)
+            await q.message.reply_text("Ese nombre ya está utilizado. Selecciona otro nombre:", reply_markup=raffle_name_keyboard())
+            return
+        flow["name"] = name
+        flow["total"] = 100
+        flow["group"] = DEFAULT_GROUP_ID
+        flow["step"] = "price"
+        await q.answer(f"{name} seleccionado")
+        await q.message.reply_text(f"✅ Nombre seleccionado: *{name}*", parse_mode="Markdown")
+        await q.message.reply_text(admin_flow_prompt("price"), parse_mode="Markdown", reply_markup=raffle_price_keyboard())
+        return
+
     if data.startswith("createprice:") or data.startswith("createpercent:"):
         if not is_admin(uid) or q.message.chat.type != "private":
             await q.answer("Solo el administrador puede crear listas.", show_alert=True)
@@ -1714,8 +1760,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Aún no hay llaves PIX configuradas.", show_alert=True)
             await q.message.reply_text("⚙️ No hay llaves PIX configuradas. Cuando me proporciones las llaves, aparecerán aquí para seleccionarlas y enviarlas con un toque.")
             return
-        buttons = [[InlineKeyboardButton(label, callback_data=f"pixkey:{i}:{user_id}:{req_id}")]
-                   for i, (label, _key) in enumerate(PIX_KEYS)]
+        buttons = [[InlineKeyboardButton(f"{label} · {key_text}", callback_data=f"pixkey:{i}:{user_id}:{req_id}")]
+                   for i, (label, key_text) in enumerate(PIX_KEYS)]
         await q.answer("Selecciona la llave PIX.")
         await q.message.reply_text("🔑 Selecciona la llave PIX que deseas enviar:", reply_markup=InlineKeyboardMarkup(buttons))
         return
@@ -1736,8 +1782,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not req or req["status"] not in {"key_requested", "awaiting_button"}:
             await q.answer("La solicitud ya no está disponible.", show_alert=True)
             return
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("💵 Ya realicé el pago", callback_data=f"userpaid:{req_id}")]])
-        key_msg = await context.bot.send_message(user_id, "🔑 LLAVE PIX\n\n" + str(key_text) + "\n\nCuando hayas realizado el pago, pulsa «Ya realicé el pago».", reply_markup=keyboard)
+        pix_keyboard_rows = []
+        try:
+            from telegram import CopyTextButton
+            pix_keyboard_rows.append([InlineKeyboardButton(
+                text=str(key_text), copy_text=CopyTextButton(text=str(key_text))
+            )])
+            copy_hint = "Pulsa el botón con la llave para copiarla y pegarla en tu aplicación bancaria."
+        except (ImportError, TypeError):
+            # Compatibilidad con versiones antiguas de python-telegram-bot.
+            copy_hint = "Mantén pulsada la llave para copiarla si tu Telegram no ofrece el botón de copiar."
+        pix_keyboard_rows.append([InlineKeyboardButton("💵 Ya realicé el pago", callback_data=f"userpaid:{req_id}")])
+        pix_keyboard = InlineKeyboardMarkup(pix_keyboard_rows)
+        pix_kind = "teléfono" if "tel" in label.lower() else "correo"
+        key_msg = await context.bot.send_message(
+            user_id,
+            f"🔑 LLAVE PIX · {pix_kind.upper()}\n\n<code>{html.escape(str(key_text))}</code>\n\n{copy_hint}\n\nCuando hayas realizado el pago, pulsa «Ya realicé el pago».",
+            parse_mode="HTML", reply_markup=pix_keyboard
+        )
         with db() as con:
             con.execute("UPDATE requests SET status='awaiting_user_click',pay_button_at=?,payment_deadline_at=NULL,key_message_id=? WHERE id=? AND user_id=? AND status IN ('key_requested','awaiting_button')", (iso_now(), key_msg.message_id, req_id, user_id))
         await q.answer(f"Llave {label} enviada.")
@@ -1921,33 +1983,132 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         audit("payment_claimed_waiting_receipt", f"Solicitud {req_id}; usuario {uid}")
         return
 
-    if data.startswith("prize:"):
+    if data.startswith("prizerequest:"):
+        try:
+            winner_id = int(data.split(":", 1)[1])
+        except ValueError:
+            await q.answer("Solicitud inválida.", show_alert=True)
+            return
+        if q.message.chat.type != "private":
+            await q.answer("Solicita el premio desde el chat privado del bot.", show_alert=True)
+            return
+        with db() as con:
+            winner = con.execute("SELECT * FROM winners WHERE id=?", (winner_id,)).fetchone()
+            if not winner or uid != winner["user_id"]:
+                await q.answer("Esta solicitud no te pertenece.", show_alert=True)
+                return
+            if winner["prize_received"] or winner["prize_status"] != "announced":
+                await q.answer("La solicitud de este premio ya está en proceso o fue completada.", show_alert=True)
+                return
+            if not verify_winner_ownership(con, winner):
+                await q.answer("No se pudo confirmar que seas el propietario del número ganador.", show_alert=True)
+                return
+            con.execute("UPDATE winners SET prize_status='requested' WHERE id=?", (winner_id,))
+        raffle = get_raffle(winner["raffle_id"])
+        admin_keyboard_prize = InlineKeyboardMarkup([[InlineKeyboardButton("🔑 Solicitar llave PIX al usuario", callback_data=f"prizepix:{winner_id}")]])
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=("🎁 <b>SOLICITUD DE ENTREGA DE PREMIO</b>\n\n"
+                      f"Lista: <b>{html.escape(raffle['name'] if raffle else str(winner['raffle_id']))}</b>\n"
+                      f"Ganador: <b>{html.escape(winner['name'])}</b>\n"
+                      f"ID Telegram: <code>{winner['user_id']}</code>\n"
+                      f"Número ganador: <b>{int(winner['number']):02d}</b>\n\n"
+                      "✅ El bot volvió a verificar la tabla de números y encontró una compra aprobada de este número a nombre del usuario solicitante."),
+                parse_mode="HTML", reply_markup=admin_keyboard_prize
+            )
+            await q.answer("Solicitud verificada y enviada al administrador.")
+            await q.edit_message_reply_markup(reply_markup=None)
+            await context.bot.send_message(uid, "✅ Tu identidad como ganador y tu número premiado fueron verificados. El administrador recibió tu solicitud.")
+            audit("winner_prize_requested", f"Ganador #{winner_id} solicitó premio", uid)
+        except Exception:
+            log.exception("No se pudo enviar la solicitud de premio al administrador")
+            await q.answer("No se pudo enviar la solicitud. Inténtalo de nuevo.", show_alert=True)
+        return
+
+    if data.startswith("prizepix:"):
+        if not is_admin(uid) or q.message.chat.type != "private":
+            await q.answer("Solo el administrador puede solicitar la llave PIX.", show_alert=True)
+            return
         winner_id = int(data.split(":", 1)[1])
         with db() as con:
             winner = con.execute("SELECT * FROM winners WHERE id=?", (winner_id,)).fetchone()
-            if not winner:
-                await q.answer("Esta confirmación ya no está disponible.", show_alert=True)
+            if not winner or winner["prize_status"] != "requested" or winner["prize_received"]:
+                await q.answer("La solicitud ya no está disponible.", show_alert=True)
                 return
-            if uid != winner["user_id"]:
-                await q.answer("Solo el ganador registrado puede confirmar el premio.", show_alert=True)
+            if not verify_winner_ownership(con, winner):
+                await q.answer("La verificación del ganador ya no coincide. No se envió la solicitud.", show_alert=True)
                 return
-            if winner["prize_received"]:
-                await q.answer("El premio ya fue confirmado.", show_alert=True)
-                return
-            con.execute("UPDATE winners SET receipt_pending=1 WHERE id=?", (winner_id,))
-        await q.answer("Envíame el comprobante por privado")
-        try:
-            await context.bot.send_message(
-                chat_id=uid,
-                text=("📸 Para confirmar que recibiste el premio, envíame aquí en este chat "
-                      "una *captura de la transferencia* que te hicieron. La captura se publicará "
-                      "en el canal de transparencia junto con la confirmación de premio recibido. "
-                      "Antes de enviarla, tapa contraseñas, claves, saldo y datos bancarios sensibles."),
-                parse_mode="Markdown"
-            )
-        except Exception:
-            await q.answer("Abre el chat privado del bot y pulsa /start para enviar la captura.", show_alert=True)
+            con.execute("UPDATE winners SET prize_status='pix_requested' WHERE id=?", (winner_id,))
+        raffle_for_pix = get_raffle(winner["raffle_id"])
+        await context.bot.send_message(
+            winner["user_id"],
+            f"🔑 <b>NECESITAMOS TU LLAVE PIX</b>\n\nPara transferirte el premio de la <b>{html.escape(raffle_for_pix['name'] if raffle_for_pix else str(winner['raffle_id']))}</b>, envía tu llave PIX pulsando el botón de abajo.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✍️ Responder: Enviar llave PIX", callback_data=f"winnerpixinput:{winner_id}")]])
+        )
+        await q.answer("Solicitud de llave PIX enviada al ganador.")
+        await q.edit_message_reply_markup(reply_markup=None)
+        await q.message.reply_text(f"✅ Se solicitó la llave PIX al ganador {winner['name']}.")
+        audit("winner_pix_requested", f"Ganador #{winner_id}", uid)
+        return
+
+    if data.startswith("winnerpixinput:"):
+        winner_id = int(data.split(":", 1)[1])
+        with db() as con:
+            winner = con.execute("SELECT * FROM winners WHERE id=?", (winner_id,)).fetchone()
+        if not winner or uid != winner["user_id"] or winner["prize_status"] != "pix_requested":
+            await q.answer("Esta solicitud de llave PIX no te pertenece o ya no está activa.", show_alert=True)
             return
+        with db() as con:
+            con.execute("UPDATE winners SET prize_status='pix_input_pending' WHERE id=? AND user_id=? AND prize_status='pix_requested'", (winner_id, uid))
+        await q.answer("Puedes escribir tu llave PIX.")
+        await q.message.reply_text("✍️ Escribe ahora tu llave PIX en un mensaje. Comprueba que esté correcta antes de enviarla.")
+        return
+
+    if data.startswith("prizepaid:"):
+        if not is_admin(uid) or q.message.chat.type != "private":
+            await q.answer("Solo el administrador puede confirmar la transferencia.", show_alert=True)
+            return
+        winner_id = int(data.split(":", 1)[1])
+        with db() as con:
+            winner = con.execute("SELECT * FROM winners WHERE id=?", (winner_id,)).fetchone()
+            if not winner or winner["prize_status"] != "pix_received" or not winner["pix_key"] or winner["prize_received"]:
+                await q.answer("La operación no está lista para registrar la transferencia.", show_alert=True)
+                return
+            con.execute("UPDATE winners SET prize_status='payout_receipt_pending' WHERE id=?", (winner_id,))
+        await q.answer("Envía la captura de la transferencia.")
+        await q.message.reply_text(f"📸 Adjunta ahora la captura de la transferencia realizada al ganador {winner['name']} (lista #{winner['raffle_id']}).")
+        return
+
+    if data.startswith("prizereceived:"):
+        winner_id = int(data.split(":", 1)[1])
+        with db() as con:
+            winner = con.execute("SELECT * FROM winners WHERE id=?", (winner_id,)).fetchone()
+            if not winner or uid != winner["user_id"]:
+                await q.answer("Solo el ganador registrado puede confirmar la recepción.", show_alert=True)
+                return
+            if winner["prize_status"] != "awaiting_user_confirmation" or winner["prize_received"]:
+                await q.answer("No hay una transferencia pendiente de confirmar.", show_alert=True)
+                return
+            con.execute("UPDATE winners SET receipt_pending=1,prize_status='user_confirmed' WHERE id=?", (winner_id,))
+        raffle = get_raffle(winner["raffle_id"])
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"✅ <b>EL GANADOR CONFIRMA QUE RECIBIÓ EL PREMIO</b>\n\nLista: <b>{html.escape(raffle['name'] if raffle else str(winner['raffle_id']))}</b>\nGanador: <b>{html.escape(winner['name'])}</b>\nNúmero: <b>{int(winner['number']):02d}</b>\nID: <code>{winner['user_id']}</code>\n\nEstá pendiente su captura de confirmación para publicarla en el canal.",
+            parse_mode="HTML"
+        )
+        await q.answer("Gracias por confirmar. Envía la captura para publicarla en el canal.")
+        await q.edit_message_reply_markup(reply_markup=None)
+        await context.bot.send_message(
+            uid,
+            "📸 Para completar la confirmación, envía una captura donde se vea la recepción del premio. La publicaremos en el canal. Tapa contraseñas, códigos y datos bancarios sensibles."
+        )
+        audit("winner_confirmed_receipt", f"Ganador #{winner_id} confirmó recepción", uid)
+        return
+
+    if data.startswith("prize:"):
+        await q.answer("Este botón pertenece al flujo anterior. Usa el botón de solicitud de premio del mensaje privado.", show_alert=True)
         return
 
     if not is_admin(uid):
@@ -2091,7 +2252,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action = data.split(":", 1)[1]
         if action == "create":
             context.user_data["admin_flow"] = {"kind": "create", "step": "name"}
-            await q.message.reply_text(admin_flow_prompt("name"), parse_mode="Markdown", reply_markup=admin_keyboard())
+            await q.message.reply_text(admin_flow_prompt("name"), parse_mode="Markdown", reply_markup=raffle_name_keyboard())
         elif action == "active":
             with db() as con:
                 rows = [dict(r) for r in con.execute("SELECT * FROM raffles WHERE status='active' ORDER BY id").fetchall()]
@@ -2415,6 +2576,34 @@ async def prize_receipt_photo_handler(update: Update, context: ContextTypes.DEFA
     user = update.effective_user
     if not message or not user or not message.photo or message.chat.type != "private":
         return
+    # Captura de la transferencia enviada por el administrador al ganador.
+    if is_admin(user.id):
+        with db() as con:
+            payout_winner = con.execute(
+                "SELECT * FROM winners WHERE prize_status='payout_receipt_pending' AND prize_received=0 ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if payout_winner:
+            photo_file_id = message.photo[-1].file_id
+            raffle = get_raffle(payout_winner["raffle_id"])
+            try:
+                sent = await context.bot.send_photo(
+                    chat_id=payout_winner["user_id"], photo=photo_file_id,
+                    caption=(f"💸 <b>TRANSFERENCIA DEL PREMIO REALIZADA</b>\n\n"
+                             f"Lista: <b>{html.escape(raffle['name'] if raffle else str(payout_winner['raffle_id']))}</b>\n"
+                             f"Número ganador: <b>{int(payout_winner['number']):02d}</b>\n\n"
+                             "El administrador ha enviado el comprobante de la transferencia. Cuando compruebes que recibiste el premio, pulsa el botón de abajo."),
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Ya Recibí el Premio", callback_data=f"prizereceived:{payout_winner['id']}")]])
+                )
+                with db() as con:
+                    con.execute("UPDATE winners SET payout_receipt_file_id=?,prize_status='awaiting_user_confirmation' WHERE id=? AND prize_status='payout_receipt_pending'",
+                                (photo_file_id, payout_winner["id"]))
+                await message.reply_text(f"✅ Comprobante enviado al ganador {payout_winner['name']}. Esperando su confirmación.")
+                audit("winner_payout_receipt_sent", f"Ganador #{payout_winner['id']}; mensaje {sent.message_id}", user.id)
+            except Exception:
+                log.exception("No se pudo enviar el comprobante de transferencia al ganador")
+                await message.reply_text("No pude enviar la captura al ganador. La operación sigue pendiente; vuelve a enviar la foto.")
+            return
     # Comprobante obligatorio después de pulsar «Ya realicé el pago».
     with db() as con:
         payment_req = con.execute(
@@ -2502,7 +2691,7 @@ async def prize_receipt_photo_handler(update: Update, context: ContextTypes.DEFA
         )
         await context.bot.send_photo(chat_id=CHANNEL_CHAT_ID, photo=photo_file_id, caption=public_caption, parse_mode="HTML")
         with db() as con:
-            con.execute("UPDATE winners SET prize_received=1,receipt_pending=0,received_at=? WHERE id=?", (iso_now(), winner["id"]))
+            con.execute("UPDATE winners SET prize_received=1,receipt_pending=0,prize_status='completed',received_at=? WHERE id=?", (iso_now(), winner["id"]))
         if winner["channel_message_id"]:
             try:
                 await context.bot.edit_message_text(
@@ -2517,6 +2706,10 @@ async def prize_receipt_photo_handler(update: Update, context: ContextTypes.DEFA
             except Exception:
                 log.exception("No se pudo actualizar el mensaje del ganador en el canal")
         await message.reply_text("✅ Captura recibida y publicada en el canal. Tu premio quedó marcado como recibido.")
+        try:
+            await context.bot.send_message(ADMIN_ID, f"🏁 Premio de {winner['name']} (lista #{winner['raffle_id']}, número {int(winner['number']):02d}) completado. La captura de recepción fue publicada en el canal.")
+        except Exception:
+            log.exception("No se pudo enviar al administrador la confirmación final del premio")
         audit("prize_receipt_uploaded", f"Ganador #{winner['id']} comprobante enviado", user.id)
     except Exception:
         log.exception("No se pudo publicar el comprobante de premio")
