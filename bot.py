@@ -354,18 +354,9 @@ def set_playing_enabled(enabled):
 
 
 def participant_progress_label():
-    """Barra fina hacia el mínimo recomendado; el contador sigue creciendo sin tope ficticio."""
+    """Muestra el total general de usuarios elegibles, sin barra ni límite máximo."""
     count = eligible_user_count()
-    minimum = 100
-    ratio = min(count / minimum, 1.0)
-    width = 10
-    filled = int(round(ratio * width))
-    bar = "🟩" * filled + "▫️" * (width - filled)
-    if count < minimum:
-        detail = f"{count} · faltan {minimum-count} para 100"
-    else:
-        detail = f"{count} · mínimo 100 alcanzado"
-    return f"👥 Usuarios: {bar} {detail}"
+    return f"👥 Cantidad de usuarios (mínimo 100): {count} usuarios registrados"
 
 
 def play_status_text():
@@ -635,7 +626,7 @@ async def require_channel(update, context):
 
 
 def user_keyboard():
-    """Panel fijo: arriba muestra la cantidad de usuarios y el avance hacia el mínimo."""
+    """Panel fijo: arriba muestra el total general de usuarios registrados."""
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton(participant_progress_label())],
@@ -722,7 +713,7 @@ def build_user_stats(uid, action):
 
 
 def admin_keyboard():
-    """Teclado persistente del administrador; permanece visible en el chat privado."""
+    """Teclado persistente del administrador con el total general de usuarios."""
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton(participant_progress_label())],
