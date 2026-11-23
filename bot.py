@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 19
+Bot de rifas Telegram - versión 20
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -397,7 +397,7 @@ def _set_setting(key, value):
 
 
 async def update_admin_counter(context, count=None):
-    """Crea o edita un único mensaje pequeño, sin teclado ni botones, en el chat del admin."""
+    """Mantiene el contador visible en el chat privado del admin, junto al teclado del panel."""
     if not ADMIN_ID:
         return
     count = eligible_user_count() if count is None else int(count)
@@ -413,14 +413,16 @@ async def update_admin_counter(context, count=None):
             # Si el mensaje fue borrado o ya no se puede editar, se crea uno nuevo.
             log.info("Se renovará el mensaje contador del administrador: %s", exc)
     try:
-        sent = await context.bot.send_message(chat_id=ADMIN_ID, text=text)
+        sent = await context.bot.send_message(
+            chat_id=ADMIN_ID, text=text, reply_markup=admin_keyboard()
+        )
         _set_setting("admin_counter_message_id", sent.message_id)
     except Exception:
         log.exception("No se pudo crear/actualizar el contador compacto del administrador")
 
 
 async def update_user_counters(context, count=None):
-    """Mantiene una única línea informativa, no interactiva, en el chat de cada participante elegible."""
+    """Mantiene el contador visible en el chat privado de cada participante, junto al teclado del panel."""
     count = eligible_user_count() if count is None else int(count)
     counter_text = f"Cantidad usuarios: {count} Registrados"
     with db() as con:
@@ -442,7 +444,9 @@ async def update_user_counters(context, count=None):
                 # Si el mensaje fue borrado o ya no puede editarse, se crea uno nuevo.
                 log.debug("Se renovará el contador del usuario %s: %s", user_id, exc)
         try:
-            sent = await context.bot.send_message(chat_id=user_id, text=counter_text)
+            sent = await context.bot.send_message(
+                chat_id=user_id, text=counter_text, reply_markup=user_keyboard()
+            )
             _set_setting(key, sent.message_id)
         except Exception:
             log.debug("No se pudo enviar/actualizar el contador al usuario %s", user_id, exc_info=True)
