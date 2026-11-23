@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 23
+Bot de rifas Telegram - versión 24
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -631,6 +631,68 @@ async def refresh_user_progress_panels(context, raffle_id):
         await asyncio.sleep(0.035)
 
 
+
+
+def build_public_results():
+    """Resultados históricos completos y ganadores con enlace directo a su chat."""
+    with db() as con:
+        winners = con.execute(
+            """SELECT w.*,r.name AS raffle_name,r.prize,r.prize_value,
+                      COALESCE(NULLIF(bu.username,''),'') AS current_username
+               FROM winners w
+               JOIN raffles r ON r.id=w.raffle_id
+               LEFT JOIN bot_users bu ON bu.user_id=w.user_id
+               ORDER BY w.announced_at DESC,w.id DESC"""
+        ).fetchall()
+        draws = con.execute(
+            "SELECT draw_date,draw_type,result,fireball FROM lottery_results ORDER BY draw_date DESC,fetched_at DESC"
+        ).fetchall()
+    blocks = []
+    for row in winners:
+        username = (row["current_username"] or "").lstrip("@")
+        display = f"@{username}" if username else (row["name"] or "Ganador")
+        status = "Premio recibido" if row["prize_received"] else "Entrega pendiente"
+        blocks.append(
+            "🏆 <b>GANADOR</b>\n"
+            f"🎟️ <b>Lista:</b> {html.escape(row['raffle_name'])}\n"
+            f"🎯 <b>Número ganador:</b> {int(row['number']):02d}\n"
+            f"👤 <b>Usuario:</b> <a href=\"tg://user?id={int(row['user_id'])}\">{html.escape(display)}</a>\n"
+            f"💰 <b>Premio:</b> {html.escape(row['prize'] or 'Transferencia PIX')} · {format_brl(raffle_prize_amount(row))}\n"
+            f"📌 <b>Estado:</b> {status}\n"
+            f"📅 <b>Fecha:</b> {html.escape(str(row['announced_at'] or '')[:19].replace('T',' '))}"
+        )
+    for row in draws:
+        blocks.append(
+            f"🎯 <b>Florida Pick 3</b>\n📅 {html.escape(row['draw_date'])} · "
+            f"{'Mediodía' if row['draw_type']=='M' else 'Noche'}: <b>{html.escape(row['result'])}</b>"
+            + (f" · Fireball: {html.escape(row['fireball'])}" if row['fireball'] else "")
+        )
+    return "📚 <b>RESULTADOS Y GANADORES</b>", (
+        "\n\n".join(blocks) if blocks else "Todavía no hay resultados ni ganadores publicados."
+    )
+
+
+
+
+async def send_public_results(message):
+    title, body = build_public_results()
+    # Telegram limita cada mensaje; dividir por registros sin truncar el historial.
+    blocks = body.split("\n\n")
+    chunks, current = [], ""
+    for block in blocks:
+        candidate = block if not current else current + "\n\n" + block
+        if len(candidate) > 3500 and current:
+            chunks.append(current)
+            current = block
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    await message.reply_text(title, parse_mode="HTML", reply_markup=user_keyboard())
+    for chunk in chunks:
+        await message.reply_text(chunk, parse_mode="HTML", reply_markup=user_keyboard())
+        await asyncio.sleep(0.04)
+
 def build_user_stats(uid, action):
     """Construye el historial solicitado para mostrarlo desde el panel principal."""
     with db() as con:
@@ -1232,15 +1294,16 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     elif action == "stats":
         with db() as con:
             rows = [dict(r) for r in con.execute(
-                "SELECT * FROM raffles WHERE status='active' ORDER BY id"
+                "SELECT * FROM raffles ORDER BY id DESC"
             ).fetchall()]
         if not rows:
-            await msg.reply_text("No hay listas activas.", reply_markup=admin_keyboard())
+            await msg.reply_text("No hay listas registradas.", reply_markup=admin_keyboard())
         else:
             keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton(f"📊 {r['name']} (#{r['id']})", callback_data=f"adminstats:{r['id']}")] for r in rows]
+                [[InlineKeyboardButton(f"📊 {r['name']} (#{r['id']}) · {r['status']}", callback_data=f"adminstats:{r['id']}")] for r in rows]
+                + [[InlineKeyboardButton("⬅️ Volver al panel", callback_data="admin:back")]]
             )
-            await msg.reply_text("Selecciona la lista que quieres revisar:", reply_markup=keyboard)
+            await msg.reply_text("Selecciona cualquier lista para consultar sus estadísticas, estén abiertas o cerradas:", reply_markup=keyboard)
     elif action == "winner":
         with db() as con:
             rows = [dict(r) for r in con.execute(
@@ -1285,7 +1348,16 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             parse_mode="Markdown", reply_markup=admin_keyboard()
         )
     elif action == "history":
-        await send_history(update, context)
+        with db() as con:
+            rows = con.execute("SELECT id,name,status FROM raffles ORDER BY id DESC").fetchall()
+        if not rows:
+            await msg.reply_text("Todavía no hay listas registradas.", reply_markup=admin_keyboard())
+        else:
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton(f"📚 {r['name']} (#{r['id']}) · {r['status']}", callback_data=f"adminhistory:{r['id']}")] for r in rows]
+                + [[InlineKeyboardButton("⬅️ Volver al panel", callback_data="admin:back")]]
+            )
+            await msg.reply_text("Selecciona la lista cuyo historial de jugadas deseas revisar:", reply_markup=keyboard)
     elif action == "back":
         context.user_data.pop("admin_flow", None)
         await msg.reply_text(
@@ -1462,8 +1534,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text("El administrador todavía debe proporcionar el enlace de descarga de la aplicación.")
             return
         if text in direct_actions:
-            title, body = build_user_stats(update.effective_user.id, direct_actions[text])
-            await msg.reply_text(title + "\n\n" + body, parse_mode="Markdown", reply_markup=user_keyboard())
+            if direct_actions[text] == "history":
+                await send_public_results(msg)
+            else:
+                title, body = build_user_stats(update.effective_user.id, direct_actions[text])
+                await msg.reply_text(title + "\n\n" + body, parse_mode="Markdown", reply_markup=user_keyboard())
             return
         if text == "🆘 Ayuda / soporte":
             context.user_data["awaiting_support"] = True
@@ -1993,13 +2068,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','awaiting_payment_amount','payment_reported','awaiting_payment_receipt','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
                     (uid,)
                 ).fetchall()
-            else:
-                rows = con.execute(
-                    "SELECT w.*,r.name AS raffle_name,r.prize,r.prize_value FROM winners w JOIN raffles r ON r.id=w.raffle_id ORDER BY w.announced_at DESC LIMIT 20"
-                ).fetchall()
-                results = con.execute(
-                    "SELECT draw_date,draw_type,result,fireball FROM lottery_results ORDER BY draw_date DESC,fetched_at DESC LIMIT 10"
-                ).fetchall()
+        if action == "history":
+            await q.answer()
+            await send_public_results(q.message)
+            return
         if action == "plays":
             blocks = [f"🎟️ {r['raffle_name']} · Números: {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))} · {float(r['amount']):.2f} {CURRENCY} · {r['status']}" for r in rows]
             blocks += [f"⏳ {r['raffle_name']} · Números: {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))} · {float(r['total_amount'] or 0):.2f} {CURRENCY} · pendiente" for r in pending]
@@ -2437,15 +2509,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text(text, parse_mode="Markdown", reply_markup=admin_back_keyboard())
         elif action == "stats":
             with db() as con:
-                rows = [dict(r) for r in con.execute("SELECT * FROM raffles WHERE status='active' ORDER BY id").fetchall()]
+                rows = [dict(r) for r in con.execute("SELECT * FROM raffles ORDER BY id DESC").fetchall()]
             if not rows:
-                await q.message.reply_text("No hay listas activas.", reply_markup=admin_back_keyboard())
+                await q.message.reply_text("No hay listas registradas.", reply_markup=admin_back_keyboard())
             else:
                 keyboard = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(f"📊 {r['name']} (#{r['id']})", callback_data=f"adminstats:{r['id']}")] for r in rows]
+                    [[InlineKeyboardButton(f"📊 {r['name']} (#{r['id']}) · {r['status']}", callback_data=f"adminstats:{r['id']}")] for r in rows]
                     + [[InlineKeyboardButton("⬅️ Volver al panel", callback_data="admin:back")]]
                 )
-                await q.message.reply_text("Selecciona la lista que quieres revisar:", reply_markup=keyboard)
+                await q.message.reply_text("Selecciona cualquier lista, abierta o cerrada, para consultar todas sus estadísticas:", reply_markup=keyboard)
         elif action == "winner":
             with db() as con:
                 rows = [dict(r) for r in con.execute("SELECT * FROM raffles WHERE status IN ('active','sold_out') ORDER BY id").fetchall()]
@@ -2485,10 +2557,83 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["awaiting_restore"] = True
             await q.message.reply_text("Envía aquí el archivo de respaldo *.json*. El sistema lo validará y te pedirá confirmación.", parse_mode="Markdown", reply_markup=admin_back_keyboard())
         elif action == "history":
-            await send_history(update, context)
+            with db() as con:
+                rows = con.execute("SELECT id,name,status FROM raffles ORDER BY id DESC").fetchall()
+            if not rows:
+                await q.message.reply_text("Todavía no hay listas registradas.", reply_markup=admin_back_keyboard())
+            else:
+                keyboard = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(f"📚 {r['name']} (#{r['id']}) · {r['status']}", callback_data=f"adminhistory:{r['id']}")] for r in rows]
+                    + [[InlineKeyboardButton("⬅️ Volver al panel", callback_data="admin:back")]]
+                )
+                await q.message.reply_text("Selecciona la lista cuyo historial de jugadas deseas revisar:", reply_markup=keyboard)
         elif action == "back":
             context.user_data.pop("admin_flow", None)
             await q.message.reply_text("⚙️ *PANEL DE ADMINISTRACIÓN*\nSelecciona una operación:", parse_mode="Markdown", reply_markup=admin_keyboard())
+        return
+
+    if data.startswith("adminhistory:"):
+        if not is_admin(uid) or q.message.chat.type != "private":
+            await q.answer("No autorizado.", show_alert=True)
+            return
+        try:
+            raffle_id = int(data.split(":", 1)[1])
+        except ValueError:
+            await q.answer("Lista inválida.", show_alert=True)
+            return
+        await q.answer()
+        await send_history(update, context, raffle_id)
+        return
+
+    if data.startswith("historyreceipt:"):
+        if not is_admin(uid) or q.message.chat.type != "private":
+            await q.answer("No autorizado.", show_alert=True)
+            return
+        try:
+            purchase_id = int(data.split(":", 1)[1])
+        except ValueError:
+            await q.answer("Registro inválido.", show_alert=True)
+            return
+        with db() as con:
+            purchase = con.execute(
+                "SELECT payment_receipt_file_id FROM purchases WHERE id=?", (purchase_id,)
+            ).fetchone()
+        if not purchase or not purchase["payment_receipt_file_id"]:
+            await q.answer("No hay comprobante guardado para este registro.", show_alert=True)
+            return
+        await q.answer()
+        await context.bot.send_photo(
+            chat_id=q.message.chat_id,
+            photo=purchase["payment_receipt_file_id"],
+            caption=f"🧾 Comprobante de pago · Registro #{purchase_id}"
+        )
+        return
+
+    if data.startswith("historyforward:"):
+        if not is_admin(uid) or q.message.chat.type != "private":
+            await q.answer("No autorizado.", show_alert=True)
+            return
+        try:
+            purchase_id = int(data.split(":", 1)[1])
+        except ValueError:
+            await q.answer("Registro inválido.", show_alert=True)
+            return
+        with db() as con:
+            purchase = con.execute("SELECT user_id FROM purchases WHERE id=?", (purchase_id,)).fetchone()
+        if not purchase:
+            await q.answer("El registro ya no existe.", show_alert=True)
+            return
+        try:
+            await context.bot.copy_message(
+                chat_id=int(purchase["user_id"]),
+                from_chat_id=q.message.chat_id,
+                message_id=q.message.message_id
+            )
+            await q.answer("Registro reenviado al usuario.")
+            await q.message.reply_text(f"✅ Se reenvió el registro #{purchase_id} al participante.")
+        except Exception:
+            log.exception("No se pudo reenviar el registro %s", purchase_id)
+            await q.answer("No se pudo reenviar. El usuario debe haber iniciado el bot.", show_alert=True)
         return
 
     if data.startswith("adminstats:"):
@@ -2714,24 +2859,64 @@ async def send_json(update, context):
     )
 
 
-async def send_history(update, context):
+async def send_history(update, context, raffle_id):
+    """Muestra cada operación de la lista por separado, con acceso al usuario y reenvío."""
     with db() as con:
+        raffle = con.execute("SELECT id,name FROM raffles WHERE id=?", (raffle_id,)).fetchone()
         rows = con.execute(
-            """SELECT p.created_at,p.name,p.user_id,p.numbers_json,p.amount,p.status,
-                      p.payment_receipt_file_id,r.name raffle
-               FROM purchases p JOIN raffles r ON r.id=p.raffle_id ORDER BY p.id DESC LIMIT 50"""
+            """SELECT p.*, COALESCE(NULLIF(p.username,''),bu.username,'') AS current_username,
+                      r.name AS raffle_name, COALESCE(rq.created_at,p.created_at) AS play_created_at,
+                      CASE WHEN p.status='rejected' THEN COALESCE(rq.total_amount,p.amount) ELSE p.amount END AS history_amount
+               FROM purchases p
+               JOIN raffles r ON r.id=p.raffle_id
+               LEFT JOIN bot_users bu ON bu.user_id=p.user_id
+               LEFT JOIN requests rq ON rq.id=p.request_id
+               WHERE p.raffle_id=?
+               ORDER BY p.id DESC""",
+            (raffle_id,)
         ).fetchall()
-    if not rows:
-        text = "Todavía no hay compras registradas."
-    else:
-        text = "👥 *Últimas 50 compras*\n" + "\n".join(
-            f"{r['created_at'][:16]} · {r['name']} · {r['raffle']} · "
-            f"{r['numbers_json']} · {r['amount']:.2f} {CURRENCY} · {r['status']} · "
-            f"{'captura adjunta' if r['payment_receipt_file_id'] else 'sin captura registrada'}"
-            for r in rows
-        )
     target = update.callback_query.message if update.callback_query else update.effective_message
-    await target.reply_text(text, parse_mode="Markdown", reply_markup=admin_keyboard())
+    if not raffle:
+        await target.reply_text("No se encontró esa lista.", reply_markup=admin_keyboard())
+        return
+    await target.reply_text(
+        f"📚 HISTORIAL COMPLETO · {html.escape(raffle['name'])} (#{raffle_id})\n"
+        f"Registros encontrados: {len(rows)}",
+        parse_mode="HTML"
+    )
+    if not rows:
+        await target.reply_text("Esta lista todavía no tiene jugadas aprobadas ni rechazadas.", reply_markup=admin_keyboard())
+        return
+    for row in rows:
+        try:
+            numbers = ", ".join(f"{int(n):02d}" for n in json.loads(row["numbers_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            numbers = str(row["numbers_json"])
+        username = (row["current_username"] or row["username"] or "").lstrip("@")
+        display = f"@{username}" if username else (row["name"] or "Usuario")
+        status = str(row["status"]).upper()
+        timestamp = str(row["play_created_at"] or "Fecha no registrada").replace("T", " ")[:19]
+        receipt = "Adjunto registrado" if row["payment_receipt_file_id"] else "Sin captura registrada"
+        body = (
+            "🧾 <b>REGISTRO DE JUGADA</b>\n\n"
+            f"📅 <b>Fecha y hora:</b> {html.escape(timestamp)}\n"
+            f"👤 <b>Nombre Usuario:</b> <a href=\"tg://user?id={int(row['user_id'])}\">{html.escape(display)}</a>\n"
+            f"🎟️ <b>Nombre de la lista:</b> {html.escape(row['raffle_name'])}\n"
+            f"🔢 <b>Números jugados:</b> {html.escape(numbers)}\n"
+            f"💰 <b>Importe de la jugada:</b> {format_brl(row['history_amount'])}\n"
+            f"📌 <b>Status:</b> {'APROBADA' if row['status']=='approved' else 'RECHAZADA' if row['status']=='rejected' else html.escape(status)}\n"
+            f"🧾 <b>Comprobante:</b> {receipt}\n"
+            f"🆔 <b>Registro:</b> #{int(row['id'])} · Solicitud {html.escape(str(row['request_id']))}"
+        )
+        buttons = [
+            InlineKeyboardButton("↗️ Reenviar este registro al usuario", callback_data=f"historyforward:{int(row['id'])}")
+        ]
+        if row["payment_receipt_file_id"]:
+            buttons.append(InlineKeyboardButton("🧾 Ver comprobante", callback_data=f"historyreceipt:{int(row['id'])}"))
+        keyboard = InlineKeyboardMarkup([buttons])
+        await target.reply_text(body, parse_mode="HTML", reply_markup=keyboard)
+        await asyncio.sleep(0.03)
+    await target.reply_text("Fin del historial de esta lista.", reply_markup=admin_keyboard())
 
 
 async def prize_receipt_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3045,6 +3230,9 @@ async def pick3_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     source = "florida_pick3" if context.args[1].lower() == "on" else "manual"
     with db() as con:
+        if raffle_locked_until_prize_received(con, raffle_id):
+            await update.effective_message.reply_text("🔒 Esta lista está cerrada y protegida. No puedes modificar su configuración hasta que el ganador confirme la recepción del premio.")
+            return
         cur = con.execute("UPDATE raffles SET draw_source=? WHERE id=?", (source, raffle_id))
     if not cur.rowcount:
         await update.effective_message.reply_text("No existe esa rifa.")
