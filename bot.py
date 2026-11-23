@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 20
+Bot de rifas Telegram - versión 21
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -396,29 +396,43 @@ def _set_setting(key, value):
         )
 
 
+def admin_user_count_keyboard(count):
+    """Botón compacto superior con el total de usuarios registrados."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"👥 {int(count)}", callback_data="admin:count")
+    ]])
+
+
 async def update_admin_counter(context, count=None):
-    """Mantiene el contador visible en el chat privado del admin, junto al teclado del panel."""
+    """Actualiza en tiempo real el botón compacto de usuarios del panel admin."""
     if not ADMIN_ID:
         return
     count = eligible_user_count() if count is None else int(count)
-    text = f"Cantidad usuarios: {count} Registrados"
+    keyboard = admin_user_count_keyboard(count)
     message_id = _get_setting("admin_counter_message_id")
     if message_id:
         try:
+            # El texto invisible deja visible únicamente el pequeño botón con la cifra.
             await context.bot.edit_message_text(
-                chat_id=ADMIN_ID, message_id=int(message_id), text=text
+                chat_id=ADMIN_ID,
+                message_id=int(message_id),
+                text="\u2063",
+                reply_markup=keyboard
             )
             return
         except Exception as exc:
-            # Si el mensaje fue borrado o ya no se puede editar, se crea uno nuevo.
-            log.info("Se renovará el mensaje contador del administrador: %s", exc)
+            if "message is not modified" in str(exc).lower():
+                return
+            log.info("Se renovará el botón contador del administrador: %s", exc)
     try:
         sent = await context.bot.send_message(
-            chat_id=ADMIN_ID, text=text, reply_markup=admin_keyboard()
+            chat_id=ADMIN_ID,
+            text="\u2063",
+            reply_markup=keyboard
         )
         _set_setting("admin_counter_message_id", sent.message_id)
     except Exception:
-        log.exception("No se pudo crear/actualizar el contador compacto del administrador")
+        log.exception("No se pudo crear/actualizar el botón contador del administrador")
 
 
 async def update_user_counters(context, count=None):
@@ -729,7 +743,7 @@ def admin_keyboard():
             [KeyboardButton("➕ Crear lista"), KeyboardButton("📋 Listas activas")],
             [KeyboardButton("📊 Estadísticas"), KeyboardButton("🏆 Indicar Número Ganador")],
             [KeyboardButton("🔄 Resetear lista"), KeyboardButton("🗑️ Borrar lista")],
-            [KeyboardButton("👥 Historial"), KeyboardButton("👥 Usuarios actuales")],
+            [KeyboardButton("👥 Historial"), KeyboardButton("👥 Usuarios Registrados")],
             [KeyboardButton("🔒 Bloquear jugadas"), KeyboardButton("🔓 Desbloquear jugadas")],
             [KeyboardButton("💾 Crear respaldo"), KeyboardButton("♻️ Restaurar respaldo")],
             [KeyboardButton("🔄 Actualizar panel")],
@@ -2437,6 +2451,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await q.answer()
         action = data.split(":", 1)[1]
+        if action == "count":
+            await q.answer(f"Usuarios registrados: {eligible_user_count()}")
+            return
         if action == "create":
             context.user_data["admin_flow"] = {"kind": "create", "step": "name"}
             await q.message.reply_text(admin_flow_prompt("name"), parse_mode="Markdown", reply_markup=raffle_name_keyboard())
@@ -3214,7 +3231,7 @@ ADMIN_MENU_ACTIONS = {
     "💾 Crear respaldo": "backup",
     "♻️ Restaurar respaldo": "restore",
     "👥 Historial": "history",
-    "👥 Usuarios actuales": "users",
+    "👥 Usuarios Registrados": "users",
     "🔒 Bloquear jugadas": "block",
     "🔓 Desbloquear jugadas": "unblock",
     "🚫 Bloquear usuario": "block_user",
