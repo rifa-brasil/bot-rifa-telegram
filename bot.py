@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 21
+Bot de rifas Telegram - versión 22
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -397,42 +397,44 @@ def _set_setting(key, value):
 
 
 def admin_user_count_keyboard(count):
-    """Botón compacto superior con el total de usuarios registrados."""
+    """Botón pequeño y redondeado que muestra solamente la cantidad."""
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"👥 {int(count)}", callback_data="admin:count")
+        InlineKeyboardButton(str(int(count)), callback_data="admin:count")
     ]])
 
 
 async def update_admin_counter(context, count=None):
-    """Actualiza en tiempo real el botón compacto de usuarios del panel admin."""
+    """Crea una línea visible y actualiza el botón numérico sin enviar mensajes repetidos."""
     if not ADMIN_ID:
         return
+
     count = eligible_user_count() if count is None else int(count)
     keyboard = admin_user_count_keyboard(count)
-    message_id = _get_setting("admin_counter_message_id")
+
+    # Se usa una clave nueva para abandonar el mensaje invisible de versiones anteriores.
+    message_id = _get_setting("admin_counter_message_id_v2")
     if message_id:
         try:
-            # El texto invisible deja visible únicamente el pequeño botón con la cifra.
-            await context.bot.edit_message_text(
+            await context.bot.edit_message_reply_markup(
                 chat_id=ADMIN_ID,
                 message_id=int(message_id),
-                text="\u2063",
                 reply_markup=keyboard
             )
             return
         except Exception as exc:
             if "message is not modified" in str(exc).lower():
                 return
-            log.info("Se renovará el botón contador del administrador: %s", exc)
+            log.info("Se recreará el contador visible del administrador: %s", exc)
+
     try:
         sent = await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text="\u2063",
+            text="👥 Usuarios registrados",
             reply_markup=keyboard
         )
-        _set_setting("admin_counter_message_id", sent.message_id)
+        _set_setting("admin_counter_message_id_v2", sent.message_id)
     except Exception:
-        log.exception("No se pudo crear/actualizar el botón contador del administrador")
+        log.exception("No se pudo crear/actualizar el contador visible del administrador")
 
 
 async def update_user_counters(context, count=None):
