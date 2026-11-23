@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 25
+Bot de rifas Telegram - versión 26
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -1282,12 +1282,12 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 "SELECT * FROM raffles WHERE status='active' ORDER BY id"
             ).fetchall()]
         if not rows:
-            result = "No hay listas activas registradas."
+            await msg.reply_text("No hay listas activas registradas.", reply_markup=admin_keyboard())
         else:
-            blocks = []
+            await msg.reply_text(f"📋 *LISTAS ACTIVAS · {len(rows)} LISTA(S)*", parse_mode="Markdown", reply_markup=admin_keyboard())
             for item in rows:
                 st = stats(item["id"])
-                blocks.append(
+                result = (
                     f"🎟️ *{item['name']}* (#{item['id']})\n\n"
                     f"🔢 *Número total:* {st['total']}\n"
                     f"💵 *Valor por número:* {st['price']:.2f} {CURRENCY}\n"
@@ -1301,8 +1301,8 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     f"📌 *Estado:* {item['status'].upper()}\n"
                     f"👥 *Grupo:* {item['group_id']}"
                 )
-            result = "📋 *LISTAS ACTIVAS*\n\n" + "\n\n".join(blocks)
-        await msg.reply_text(result, parse_mode="Markdown", reply_markup=admin_keyboard())
+                await msg.reply_text(result, parse_mode="Markdown", reply_markup=admin_keyboard())
+                await asyncio.sleep(0.04)
     elif action == "stats":
         with db() as con:
             rows = [dict(r) for r in con.execute(
@@ -1412,7 +1412,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 copy_row.append([InlineKeyboardButton(text="📋 Copiar llave PIX", copy_text=CopyTextButton(text=pix_key))])
             except (ImportError, TypeError):
                 pass
-            copy_row.append([InlineKeyboardButton("💸 Premio enviado", callback_data=f"prizepaid:{winner['id']}")])
+            copy_row.append([InlineKeyboardButton("💸 Enviar premio y adjuntar captura", callback_data=f"prizepaid:{winner['id']}")])
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
                 text=("🔑 <b>LLAVE PIX RECIBIDA · PREMIO</b>\n\n"
@@ -1422,7 +1422,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                       f"Número ganador: <b>{int(winner['number']):02d}</b>\n"
                       f"Monto del premio: <b>{prize_amount_text}</b>\n\n"
                       f"Llave PIX: <code>{html.escape(pix_key)}</code>\n\n"
-                      "Usa el botón para copiar la llave. Cuando completes la transferencia, pulsa «Premio enviado» y adjunta la captura."),
+                      "Usa el botón para copiar la llave. Cuando completes la transferencia, pulsa «Enviar premio y adjuntar captura»."),
                 parse_mode="HTML", reply_markup=InlineKeyboardMarkup(copy_row)
             )
             await msg.reply_text("✅ Tu llave PIX fue enviada al administrador. Te avisaremos cuando se realice la transferencia.")
@@ -2180,70 +2180,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not verify_winner_ownership(con, winner):
                 await q.answer("No se pudo confirmar que seas el propietario del número ganador.", show_alert=True)
                 return
-            con.execute("UPDATE winners SET prize_status='requested' WHERE id=?", (winner_id,))
+            con.execute("UPDATE winners SET prize_status='pix_input_pending' WHERE id=?", (winner_id,))
         raffle = get_raffle(winner["raffle_id"])
         prize_amount_text = format_brl(raffle_prize_amount(raffle))
-        admin_keyboard_prize = InlineKeyboardMarkup([[InlineKeyboardButton("🔑 Solicitar llave PIX al usuario", callback_data=f"prizepix:{winner_id}")]])
+        await q.answer("Identidad verificada. Envía tu llave PIX.")
         try:
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=("🎁 <b>SOLICITUD DE ENTREGA DE PREMIO</b>\n\n"
-                      f"Lista: <b>{html.escape(raffle['name'] if raffle else str(winner['raffle_id']))}</b>\n"
-                      f"Ganador: <b>{html.escape(winner['name'])}</b>\n"
-                      f"ID Telegram: <code>{winner['user_id']}</code>\n"
-                      f"Número ganador: <b>{int(winner['number']):02d}</b>\n"
-                      f"💰 <b>Monto del premio: {prize_amount_text}</b>\n\n"
-                      "✅ El bot volvió a verificar la tabla de números y encontró una compra aprobada de este número a nombre del usuario solicitante."),
-                parse_mode="HTML", reply_markup=admin_keyboard_prize
-            )
-            await q.answer("Solicitud verificada y enviada al administrador.")
             await q.edit_message_reply_markup(reply_markup=None)
-            await context.bot.send_message(uid, "✅ Tu identidad como ganador y tu número premiado fueron verificados. El administrador recibió tu solicitud.")
-            audit("winner_prize_requested", f"Ganador #{winner_id} solicitó premio", uid)
+            await context.bot.send_message(
+                uid,
+                ("🔑 <b>SOLICITUD DE TU PREMIO</b>\n\n"
+                 f"Lista: <b>{html.escape(raffle['name'] if raffle else str(winner['raffle_id']))}</b>\n"
+                 f"Número ganador: <b>{int(winner['number']):02d}</b>\n"
+                 f"Monto del premio: <b>{prize_amount_text}</b>\n\n"
+                 "Para enviar tu premio, escribe ahora tu llave PIX en un mensaje. "
+                 "Revisa que esté correcta antes de enviarla. La recibirá directamente el administrador."),
+                parse_mode="HTML"
+            )
+            audit("winner_prize_requested", f"Ganador #{winner_id} solicitó premio y debe enviar llave PIX", uid)
         except Exception:
-            log.exception("No se pudo enviar la solicitud de premio al administrador")
-            await q.answer("No se pudo enviar la solicitud. Inténtalo de nuevo.", show_alert=True)
-        return
-
-    if data.startswith("prizepix:"):
-        if not is_admin(uid) or q.message.chat.type != "private":
-            await q.answer("Solo el administrador puede solicitar la llave PIX.", show_alert=True)
-            return
-        winner_id = int(data.split(":", 1)[1])
-        with db() as con:
-            winner = con.execute("SELECT * FROM winners WHERE id=?", (winner_id,)).fetchone()
-            if not winner or winner["prize_status"] != "requested" or winner["prize_received"]:
-                await q.answer("La solicitud ya no está disponible.", show_alert=True)
-                return
-            if not verify_winner_ownership(con, winner):
-                await q.answer("La verificación del ganador ya no coincide. No se envió la solicitud.", show_alert=True)
-                return
-            con.execute("UPDATE winners SET prize_status='pix_requested' WHERE id=?", (winner_id,))
-        raffle_for_pix = get_raffle(winner["raffle_id"])
-        prize_amount_text = format_brl(raffle_prize_amount(raffle_for_pix))
-        await context.bot.send_message(
-            winner["user_id"],
-            f"🔑 <b>NECESITAMOS TU LLAVE PIX</b>\n\nPara transferirte el premio de la <b>{html.escape(raffle_for_pix['name'] if raffle_for_pix else str(winner['raffle_id']))}</b>, por un monto de <b>{prize_amount_text}</b>, envía tu llave PIX pulsando el botón de abajo.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✍️ Responder: Enviar llave PIX", callback_data=f"winnerpixinput:{winner_id}")]])
-        )
-        await q.answer("Solicitud de llave PIX enviada al ganador.")
-        await q.edit_message_reply_markup(reply_markup=None)
-        await q.message.reply_text(f"✅ Se solicitó la llave PIX al ganador {winner['name']}.")
-        audit("winner_pix_requested", f"Ganador #{winner_id}", uid)
-        return
-
-    if data.startswith("winnerpixinput:"):
-        winner_id = int(data.split(":", 1)[1])
-        with db() as con:
-            winner = con.execute("SELECT * FROM winners WHERE id=?", (winner_id,)).fetchone()
-        if not winner or uid != winner["user_id"] or winner["prize_status"] != "pix_requested":
-            await q.answer("Esta solicitud de llave PIX no te pertenece o ya no está activa.", show_alert=True)
-            return
-        with db() as con:
-            con.execute("UPDATE winners SET prize_status='pix_input_pending' WHERE id=? AND user_id=? AND prize_status='pix_requested'", (winner_id, uid))
-        await q.answer("Puedes escribir tu llave PIX.")
-        await q.message.reply_text("✍️ Escribe ahora tu llave PIX en un mensaje. Comprueba que esté correcta antes de enviarla.")
+            log.exception("No se pudo enviar el mensaje para solicitar el premio")
+            await context.bot.send_message(uid, "No pude iniciar la solicitud de premio. Inténtalo nuevamente o contacta al administrador.")
         return
 
     if data.startswith("prizepaid:"):
@@ -2505,12 +2461,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with db() as con:
                 rows = [dict(r) for r in con.execute("SELECT * FROM raffles WHERE status='active' ORDER BY id").fetchall()]
             if not rows:
-                text = "No hay listas activas registradas."
+                await q.message.reply_text("No hay listas activas registradas.", reply_markup=admin_back_keyboard())
             else:
-                blocks = []
+                await q.message.reply_text(f"📋 *LISTAS ACTIVAS · {len(rows)} LISTA(S)*", parse_mode="Markdown", reply_markup=admin_back_keyboard())
                 for item in rows:
                     st = stats(item["id"])
-                    blocks.append(
+                    text = (
                         f"🎟️ *{item['name']}* (#{item['id']})\n\n"
                         f"🔢 *Número total:* {st['total']}\n"
                         f"💵 *Valor por número:* {st['price']:.2f} {CURRENCY}\n"
@@ -2524,8 +2480,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"📌 *Estado:* {item['status'].upper()}\n"
                         f"👥 *Grupo:* {item['group_id']}"
                     )
-                text = "📋 *LISTAS ACTIVAS*\n\n" + "\n\n".join(blocks)
-            await q.message.reply_text(text, parse_mode="Markdown", reply_markup=admin_back_keyboard())
+                    await q.message.reply_text(text, parse_mode="Markdown", reply_markup=admin_back_keyboard())
+                    await asyncio.sleep(0.04)
         elif action == "stats":
             with db() as con:
                 rows = [dict(r) for r in con.execute("SELECT * FROM raffles ORDER BY id DESC").fetchall()]
