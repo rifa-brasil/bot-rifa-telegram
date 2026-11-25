@@ -17,6 +17,7 @@ import html
 import uuid
 import asyncio
 import logging
+import random
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -107,6 +108,13 @@ def init_db():
         CREATE TABLE IF NOT EXISTS bot_settings (
             setting_key TEXT PRIMARY KEY,
             setting_value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS pix_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL,
+            key_text TEXT NOT NULL UNIQUE,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS raffle_progress_messages (
             raffle_id INTEGER NOT NULL, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
@@ -291,6 +299,12 @@ def init_db():
         WHEN EXISTS (SELECT 1 FROM raffles WHERE id<>NEW.id AND lower(trim(name))=lower(trim(NEW.name)))
         BEGIN SELECT RAISE(ABORT, 'duplicate_raffle_name'); END;
         """)
+        # Migra las llaves PIX que estaban configuradas en el código a la gestión del panel.
+        for legacy_label, legacy_key in PIX_KEYS:
+            con.execute(
+                "INSERT OR IGNORE INTO pix_keys(label,key_text,active,created_at) VALUES(?,?,1,?)",
+                (legacy_label, legacy_key, iso_now())
+            )
         # El administrador controla manualmente si se aceptan nuevas jugadas.
         con.execute("INSERT OR IGNORE INTO bot_settings(setting_key,setting_value) VALUES('playing_enabled','0')")
         # No se borran listas al arrancar: init_db solo crea/migra tablas y conserva los registros.
@@ -753,7 +767,8 @@ def admin_keyboard():
             [KeyboardButton("➕ Crear lista"), KeyboardButton("📋 Listas activas")],
             [KeyboardButton("📊 Estadísticas"), KeyboardButton("🏆 Indicar Número Ganador")],
             [KeyboardButton("🔄 Resetear lista"), KeyboardButton("🗑️ Borrar lista")],
-            [KeyboardButton("👥 Historial"), KeyboardButton("🔄 Actualizar panel")],
+            [KeyboardButton("👥 Historial"), KeyboardButton("🔑 Gestionar llaves PIX")],
+            [KeyboardButton("🔄 Actualizar panel")],
             [KeyboardButton("🔒 Bloquear jugadas"), KeyboardButton("🔓 Desbloquear jugadas")],
             [KeyboardButton("💾 Crear respaldo"), KeyboardButton("♻️ Restaurar respaldo")],
         ],
@@ -761,6 +776,64 @@ def admin_keyboard():
         is_persistent=True,
         input_field_placeholder="Selecciona una opción de administración"
     )
+
+
+def get_pix_keys():
+    with db() as con:
+        return [dict(r) for r in con.execute(
+            "SELECT id,label,key_text FROM pix_keys WHERE active=1 ORDER BY id"
+        ).fetchall()]
+
+
+def next_random_pix_key():
+    """Entrega todas las llaves en orden aleatorio antes de iniciar otra ronda."""
+    with db() as con:
+        keys = [dict(r) for r in con.execute(
+            "SELECT id,label,key_text FROM pix_keys WHERE active=1 ORDER BY id"
+        ).fetchall()]
+        if not keys:
+            return None
+        ids = [int(r["id"]) for r in keys]
+        remaining_raw = con.execute(
+            "SELECT setting_value FROM bot_settings WHERE setting_key='pix_rotation_remaining'"
+        ).fetchone()
+        last_raw = con.execute(
+            "SELECT setting_value FROM bot_settings WHERE setting_key='pix_rotation_last'"
+        ).fetchone()
+        try:
+            remaining = [int(x) for x in json.loads(remaining_raw[0])] if remaining_raw else []
+        except (ValueError, TypeError, json.JSONDecodeError):
+            remaining = []
+        remaining = [x for x in remaining if x in ids]
+        if not remaining:
+            remaining = ids[:]
+            random.shuffle(remaining)
+            last_id = int(last_raw[0]) if last_raw else None
+            if len(remaining) > 1 and remaining[0] == last_id:
+                remaining[0], remaining[1] = remaining[1], remaining[0]
+        selected_id = remaining.pop(0)
+        con.execute(
+            "INSERT INTO bot_settings(setting_key,setting_value) VALUES('pix_rotation_remaining',?) "
+            "ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value",
+            (json.dumps(remaining),)
+        )
+        con.execute(
+            "INSERT INTO bot_settings(setting_key,setting_value) VALUES('pix_rotation_last',?) "
+            "ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value",
+            (str(selected_id),)
+        )
+        return next((r for r in keys if int(r["id"]) == selected_id), None)
+
+
+def pix_keys_keyboard():
+    # Flatten list of rows generated above.
+    rows = [[InlineKeyboardButton("➕ Agregar llave PIX", callback_data="pixkeys:add")]]
+    rows.extend(
+        [[InlineKeyboardButton(f"🗑️ {r['label']} · {r['key_text'][:22]}", callback_data=f"pixkeys:delete:{r['id']}")]
+         for r in get_pix_keys()]
+    )
+    rows.append([InlineKeyboardButton("⬅️ Volver al panel", callback_data="admin:back")])
+    return InlineKeyboardMarkup(rows)
 
 
 def admin_back_keyboard():
@@ -1306,6 +1379,20 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             reply_markup=admin_keyboard()
         )
         return
+    if action == "pixkeys":
+        context.user_data.pop("awaiting_pix_key_input", None)
+        keys = get_pix_keys()
+        summary = "\\n".join(
+            f"{i}. {r['label']}: {r['key_text']}" for i, r in enumerate(keys, 1)
+        ) or "Todavía no has registrado llaves PIX."
+        await msg.reply_text(
+            "🔑 GESTIÓN DE LLAVES PIX\\n\\n"
+            f"Llaves activas: {len(keys)}\\n{summary}\\n\\n"
+            "Agrega las llaves aquí. El bot las distribuirá aleatoriamente sin repetir "
+            "ninguna hasta completar la ronda.",
+            reply_markup=pix_keys_keyboard()
+        )
+        return
     if action == "users":
         await msg.reply_text("📊 BARRA INFORMATIVA\n" + participant_progress_label() + "\n\n👥 ESTADO DE PARTICIPANTES\n" + play_status_text(), reply_markup=admin_keyboard())
         return
@@ -1430,6 +1517,28 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.text or msg.text.startswith("/"):
         return
     text = msg.text.strip()
+
+    # Registro de llaves PIX desde el panel de administración.
+    if is_admin(update.effective_user.id) and context.user_data.get("awaiting_pix_key_input"):
+        if "|" not in text:
+            await msg.reply_text("Formato incorrecto. Envía: Nombre de la llave|Valor de la llave PIX")
+            return
+        label, key_text = [part.strip() for part in text.split("|", 1)]
+        if not label or not key_text or len(label) > 50 or len(key_text) > 200:
+            await msg.reply_text("Nombre o llave inválidos. Máximo 50 caracteres para el nombre y 200 para la llave.")
+            return
+        try:
+            with db() as con:
+                con.execute(
+                    "INSERT INTO pix_keys(label,key_text,active,created_at) VALUES(?,?,1,?)",
+                    (label, key_text, iso_now())
+                )
+            context.user_data.pop("awaiting_pix_key_input", None)
+            audit("pix_key_added", f"Llave PIX agregada: {label}", update.effective_user.id)
+            await msg.reply_text(f"✅ Llave PIX «{label}» registrada correctamente.", reply_markup=pix_keys_keyboard())
+        except sqlite3.IntegrityError:
+            await msg.reply_text("⚠️ Esa llave PIX ya está registrada. Envía otra diferente o vuelve al panel.", reply_markup=pix_keys_keyboard())
+        return
 
     # Llave PIX del ganador: solo se acepta del usuario propietario de la solicitud vigente.
     if update.effective_chat.type == "private" and not is_admin(update.effective_user.id):
@@ -1925,35 +2034,117 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("La solicitud ya no está disponible para solicitar la llave.", show_alert=True)
             return
         if req["status"] == "key_requested":
-            await q.answer("La solicitud de llave ya fue enviada al administrador.", show_alert=True)
+            await q.answer("Ya estás esperando una llave para esta solicitud.", show_alert=True)
+            return
+        with db() as con:
+            claimed = con.execute(
+                "UPDATE requests SET status='key_requested' WHERE id=? AND user_id=? AND status='awaiting_button'",
+                (req_id, uid)
+            ).rowcount
+        if not claimed:
+            await q.answer("Esta solicitud ya está siendo atendida.", show_alert=True)
+            return
+        pix = next_random_pix_key()
+        if not pix:
+            with db() as con:
+                con.execute("UPDATE requests SET status='awaiting_button' WHERE id=? AND status='key_requested'", (req_id,))
+            await q.answer("No hay llaves PIX registradas. Avisa al administrador.", show_alert=True)
+            await context.bot.send_message(ADMIN_ID, "⚠️ Un participante solicitó una llave PIX, pero no hay ninguna registrada.")
             return
         raffle = get_raffle(req["raffle_id"])
         nums = ", ".join(f"{n:02d}" for n in json.loads(req["numbers_json"]))
-        admin_text = (
-            "🔑 *SOLICITUD DE LLAVE*\n\n"
-            f"Solicitud: `{req_id}`\nLista: *{raffle['name'] if raffle else req['raffle_id']}*\n"
-            f"Participante: {req['name']} (@{req['username'] or 'sin username'})\n"
-            f"ID Telegram: `{req['user_id']}`\nNúmeros: *{nums}*\n"
-            "Pulsa «Enviar llave PIX» y selecciona cuál deseas enviar."
-        )
-        key_admin_keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✉️ Enviar llave PIX", callback_data=f"keyreply:{req['user_id']}:{req_id}")
-        ]])
+        pix_key = str(pix["key_text"])
+        pix_keyboard_rows = []
         try:
-            await context.bot.send_message(ADMIN_ID, admin_text, parse_mode="Markdown", reply_markup=key_admin_keyboard)
+            from telegram import CopyTextButton
+            pix_keyboard_rows.append([InlineKeyboardButton(
+                text="📋 Copiar llave PIX", copy_text=CopyTextButton(text=pix_key)
+            )])
+        except (ImportError, TypeError):
+            pass
+        pix_keyboard_rows.append([InlineKeyboardButton("💵 Ya realicé el pago", callback_data=f"userpaid:{req_id}")])
+        try:
+            key_msg = await context.bot.send_message(
+                chat_id=uid,
+                text=(f"🔑 LLAVE PIX · {html.escape(str(pix['label']).upper())}\\n\\n"
+                      f"<code>{html.escape(pix_key)}</code>\\n\\n"
+                      "Copia la llave y realiza el pago en tu aplicación bancaria. "
+                      "Cuando termines, pulsa «Ya realicé el pago»."),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(pix_keyboard_rows)
+            )
             with db() as con:
                 con.execute(
-                    "UPDATE requests SET status='key_requested' WHERE id=? AND status='awaiting_button'",
-                    (req_id,)
+                    "UPDATE requests SET status='awaiting_user_click',pay_button_at=?,payment_deadline_at=NULL,key_message_id=? "
+                    "WHERE id=? AND user_id=? AND status='key_requested'",
+                    (iso_now(), key_msg.message_id, req_id, uid)
                 )
-            await q.answer("Solicitud de llave PIX enviada.")
+            admin_text = (
+                "🔑 <b>LLAVE PIX ENVIADA AUTOMÁTICAMENTE</b>\\n\\n"
+                f"Solicitud: <code>{html.escape(req_id)}</code>\\n"
+                f"Lista: <b>{html.escape(raffle['name'] if raffle else str(req['raffle_id']))}</b>\\n"
+                f"Participante: <a href=\"tg://user?id={uid}\"><b>{html.escape(req['name'])}</b></a> "
+                f"(ID <code>{uid}</code>)\\n"
+                f"Números: <b>{html.escape(nums)}</b>\\n"
+                f"Llave asignada ({html.escape(pix['label'])}): <code>{html.escape(pix_key)}</code>"
+            )
+            await context.bot.send_message(ADMIN_ID, admin_text, parse_mode="HTML")
+            await q.answer("¡Llave PIX enviada automáticamente!")
+            audit("automatic_pix_key_sent", f"Solicitud {req_id}; llave {pix['label']} (ID {pix['id']})", uid)
         except Exception:
-            log.exception("No se pudo notificar solicitud de llave")
-            await q.answer("No se pudo enviar la solicitud. Inténtalo de nuevo.", show_alert=True)
+            log.exception("No se pudo enviar automáticamente la llave PIX")
+            with db() as con:
+                con.execute(
+                    "UPDATE requests SET status='awaiting_button' WHERE id=? AND user_id=? AND status='key_requested'",
+                    (req_id, uid)
+                )
+            await q.answer("No pude completar el envío de la llave PIX. Inténtalo nuevamente.", show_alert=True)
         return
 
     if data == "download_pending":
         await q.answer("El enlace de descarga definitivo está pendiente de que lo proporcione el administrador.", show_alert=True)
+        return
+
+    if data.startswith("pixkeys:"):
+        if not is_admin(uid) or q.message.chat.type != "private":
+            await q.answer("Solo el administrador puede gestionar las llaves PIX.", show_alert=True)
+            return
+        parts = data.split(":")
+        if parts[1] == "add":
+            context.user_data["awaiting_pix_key_input"] = True
+            await q.answer("Envía los datos de la llave.")
+            await q.message.reply_text(
+                "➕ REGISTRAR LLAVE PIX\\n\\n"
+                "Envía un solo mensaje con este formato:\\n"
+                "Nombre de la llave|Valor de la llave PIX\\n\\n"
+                "Ejemplo: PIX teléfono|11999999999"
+            )
+            return
+        if parts[1] == "delete" and len(parts) == 3:
+            try:
+                key_id = int(parts[2])
+            except ValueError:
+                await q.answer("Llave inválida.", show_alert=True)
+                return
+            with db() as con:
+                row = con.execute("SELECT label FROM pix_keys WHERE id=? AND active=1", (key_id,)).fetchone()
+                if row:
+                    con.execute("UPDATE pix_keys SET active=0 WHERE id=?", (key_id,))
+                    # La siguiente ronda se reconstruye con las llaves que sigan activas.
+                    con.execute("DELETE FROM bot_settings WHERE setting_key='pix_rotation_remaining'")
+            if row:
+                audit("pix_key_deleted", f"Llave PIX desactivada: {row['label']}", uid)
+                await q.answer("Llave eliminada.")
+            else:
+                await q.answer("Esa llave ya no existe.", show_alert=True)
+            keys = get_pix_keys()
+            summary = "\\n".join(f"{i}. {r['label']}: {r['key_text']}" for i, r in enumerate(keys, 1)) or "Todavía no hay llaves registradas."
+            await q.message.reply_text(
+                f"🔑 LLAVES PIX ACTIVAS: {len(keys)}\\n\\n{summary}",
+                reply_markup=pix_keys_keyboard()
+            )
+            return
+        await q.answer("Acción no reconocida.", show_alert=True)
         return
 
     if data.startswith("supportreply:"):
@@ -3434,6 +3625,7 @@ ADMIN_MENU_ACTIONS = {
     "💾 Crear respaldo": "backup",
     "♻️ Restaurar respaldo": "restore",
     "👥 Historial": "history",
+    "🔑 Gestionar llaves PIX": "pixkeys",
     "👥 Usuarios Registrados": "users",
     "🔒 Bloquear jugadas": "block",
     "🔓 Desbloquear jugadas": "unblock",
