@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 40
+Bot de rifas Telegram - versión 42
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -567,27 +567,48 @@ async def notify_threshold_reached(context, count):
 
 
 async def refresh_channel_member_count(bot, enforce_minimum=True):
-    """Consulta a Telegram el total real de miembros del canal, sin contar la BD."""
+    """Consulta Telegram y excluye al propietario y al propio bot del contador."""
     global CHANNEL_MEMBER_COUNT
     if not CHANNEL_CHAT_ID:
         log.error("No se puede consultar el total de miembros: CHANNEL_CHAT_ID no está configurado.")
         return None
     try:
-        count = int(await bot.get_chat_member_count(chat_id=CHANNEL_CHAT_ID))
+        telegram_total = int(await bot.get_chat_member_count(chat_id=CHANNEL_CHAT_ID))
+
+        # El Bot API no incluye el ID del propietario en getChat; se obtiene
+        # consultando los administradores y localizando el status 'creator'.
+        excluded_ids = {int(bot.id)}  # el bot administrador nunca es usuario contabilizable
+        owner_found = False
+        try:
+            administrators = await bot.get_chat_administrators(chat_id=CHANNEL_CHAT_ID)
+            for administrator in administrators:
+                if getattr(administrator, "status", None) == "creator":
+                    excluded_ids.add(int(administrator.user.id))
+                    owner_found = True
+                    break
+        except Exception:
+            log.exception("No se pudo identificar al propietario del canal para excluirlo del contador.")
+
+        if not owner_found:
+            log.warning("Telegram no devolvió el administrador con status creator; no se puede excluir con certeza al propietario.")
+        # Ambos IDs son miembros del canal, así que se descuentan del total oficial.
+        count = max(0, telegram_total - len(excluded_ids))
         CHANNEL_MEMBER_COUNT = count
-        log.info("Telegram informa %s miembros en el canal %s.", count, CHANNEL_CHAT_ID)
+        log.info(
+            "Telegram informa %s miembros; se excluyen %s cuentas (propietario detectado=%s). Total contabilizado=%s.",
+            telegram_total, len(excluded_ids), owner_found, count
+        )
         if enforce_minimum and count < 100:
             set_playing_enabled(False)
             with db() as con:
                 con.execute("UPDATE raffles SET status='blocked' WHERE status='active'")
             log.warning(
-                "CANAL CON MENOS DE 100 MIEMBROS (%s): jugadas deshabilitadas y listas activas bloqueadas.",
+                "CANAL CON MENOS DE 100 USUARIOS CONTABILIZABLES (%s): jugadas deshabilitadas y listas activas bloqueadas.",
                 count
             )
         return count
     except Exception:
         log.exception("No se pudo consultar el total de miembros del canal mediante Telegram.")
-        # No reemplazamos el último dato válido por cero ante un error temporal.
         return CHANNEL_MEMBER_COUNT
 
 
