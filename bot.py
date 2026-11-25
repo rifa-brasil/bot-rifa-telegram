@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 44
+Bot de rifas Telegram - versión 45
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -760,10 +760,12 @@ def user_keyboard():
     count = eligible_user_count()
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(f"👥 Usuarios Registrados ({count})"), KeyboardButton("🎟️ Ver listas activas")],
-            [KeyboardButton("🎟️ Mis jugadas"), KeyboardButton("🏆 Mis premios")],
-            [KeyboardButton("📚 Resultados y ganadores"), KeyboardButton("🆘 Ayuda / soporte")],
-            [KeyboardButton("📲 Descargar aplicación")],
+            # El contador permanece solo en la primera fila.
+            [KeyboardButton(f"👥 Usuarios Registrados ({count})")],
+            # Los demás botones se organizan en parejas, en forma de cuadrícula.
+            [KeyboardButton("🎟️ Ver listas activas"), KeyboardButton("🎟️ Mis jugadas")],
+            [KeyboardButton("🏆 Mis premios"), KeyboardButton("📚 Resultados y ganadores")],
+            [KeyboardButton("🆘 Ayuda / soporte"), KeyboardButton("📲 Descargar aplicación")],
         ],
         resize_keyboard=True, is_persistent=True,
         input_field_placeholder="Selecciona una opción"
