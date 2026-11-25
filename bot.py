@@ -1191,12 +1191,18 @@ async def publish_winner(update, context, raffle_id, number):
             "SELECT user_id FROM bot_users ORDER BY joined_at"
         ).fetchall()]
 
+    # El nombre del ganador enlaza a su perfil de Telegram en todos los mensajes.
+    winner_mention = (
+        f'<a href="tg://user?id={int(row["user_id"])}">'
+        f'<b>{html.escape(str(row["name"] or "Participante"))}</b></a>'
+    )
+
     # Mensaje exclusivo para el ganador: felicitación y botón para reclamar el premio.
     winner_msg = (
-        f"🎉 ¡FELICIDADES, {row['name']}! 🎉\n\n"
-        f"🏆 Has sido el ganador del sorteo de la *{raffle['name']}*.\n"
-        f"🎯 Número ganador: *{number:02d}*.\n"
-        f"💰 *Monto del premio: {prize_amount_text}*\n\n"
+        f"🎉 ¡FELICIDADES, {winner_mention}! 🎉\\n\\n"
+        f"🏆 Has sido el ganador del sorteo de la <b>{html.escape(str(raffle['name']))}</b>.\\n"
+        f"🎯 Número ganador: <b>{number:02d}</b>.\\n"
+        f"💰 <b>Monto del premio: {html.escape(prize_amount_text)}</b>\\n\\n"
         "Para recibir tu premio, solicita la entrega al administrador pulsando el botón de abajo."
     )
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(
@@ -1206,7 +1212,7 @@ async def publish_winner(update, context, raffle_id, number):
     try:
         sent = await context.bot.send_message(
             chat_id=row["user_id"], text=winner_msg,
-            parse_mode="Markdown", reply_markup=keyboard
+            parse_mode="HTML", reply_markup=keyboard
         )
         with db() as con:
             con.execute(
@@ -1220,11 +1226,11 @@ async def publish_winner(update, context, raffle_id, number):
     # Resultado informativo para todos los demás usuarios registrados, sin felicitación
     # y sin el botón de reclamación. Un fallo individual no detiene el resto del envío.
     public_result_msg = (
-        f"🏆 RESULTADO DE LA RIFA\n\n"
-        f"🎟️ Lista: {raffle['name']}\n"
-        f"🎯 Número ganador: {number:02d}\n"
-        f"👤 Usuario ganador: {row['name']}\n"
-        f"💰 Total del premio: {prize_amount_text}"
+        f"🏆 <b>RESULTADO DE LA RIFA</b>\\n\\n"
+        f"🎟️ Lista: <b>{html.escape(str(raffle['name']))}</b>\\n"
+        f"🎯 Número ganador: <b>{number:02d}</b>\\n"
+        f"👤 Usuario ganador: {winner_mention}\\n"
+        f"💰 <b>Total del premio: {html.escape(prize_amount_text)}</b>"
     )
     broadcast_sent = 0
     broadcast_failed = 0
@@ -1232,7 +1238,7 @@ async def publish_winner(update, context, raffle_id, number):
         if user_id == int(row["user_id"]):
             continue  # El ganador ya recibió su mensaje personalizado.
         try:
-            await context.bot.send_message(chat_id=user_id, text=public_result_msg)
+            await context.bot.send_message(chat_id=user_id, text=public_result_msg, parse_mode="HTML")
             broadcast_sent += 1
         except Exception:
             broadcast_failed += 1
@@ -2053,7 +2059,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         raffle = get_raffle(req["raffle_id"])
         nums = ", ".join(f"{n:02d}" for n in json.loads(req["numbers_json"]))
-        pix_key = str(pix["key_text"])
+        pix_key_raw = str(pix["key_text"]).strip()
+        # Si la llave fue guardada como "2\n\ncorreo@...", mueve el número
+        # al encabezado y deja la llave PIX limpia en su propia línea.
+        pix_key_parts = pix_key_raw.split("\n\n", 1)
+        pix_header_suffix = ""
+        if len(pix_key_parts) == 2 and pix_key_parts[0].strip().isdigit():
+            pix_header_suffix = f" {pix_key_parts[0].strip()}"
+            pix_key = pix_key_parts[1].strip()
+        else:
+            pix_key = pix_key_raw
         pix_keyboard_rows = []
         try:
             from telegram import CopyTextButton
@@ -2066,10 +2081,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             key_msg = await context.bot.send_message(
                 chat_id=uid,
-                text=(f"🔑 LLAVE PIX · {html.escape(str(pix['label']).upper())}\\n\\n"
-                      f"<code>{html.escape(pix_key)}</code>\\n\\n"
+                text=(f"🔑 LLAVE PIX · {html.escape(str(pix['label']).upper())}{pix_header_suffix}\n"
+                      f"<code>{html.escape(pix_key)}</code>\n\n"
                       "Copia la llave y realiza el pago en tu aplicación bancaria. "
-                      "Cuando termines, pulsa «Ya realicé el pago»."),
+                      "Cuando realices el pago, pulsa «Ya realicé el pago»."),
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(pix_keyboard_rows)
             )
@@ -2213,9 +2228,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pix_keyboard_rows.append([InlineKeyboardButton("💵 Ya realicé el pago", callback_data=f"userpaid:{req_id}")])
         pix_keyboard = InlineKeyboardMarkup(pix_keyboard_rows)
         pix_kind = "teléfono" if "tel" in label.lower() else "correo"
+        legacy_key_raw = str(key_text).strip()
+        legacy_parts = legacy_key_raw.split("\n\n", 1)
+        legacy_suffix = ""
+        if len(legacy_parts) == 2 and legacy_parts[0].strip().isdigit():
+            legacy_suffix = f" {legacy_parts[0].strip()}"
+            legacy_key = legacy_parts[1].strip()
+        else:
+            legacy_key = legacy_key_raw
         key_msg = await context.bot.send_message(
             user_id,
-            f"🔑 LLAVE PIX · {pix_kind.upper()}\n\n<code>{html.escape(str(key_text))}</code>\n\n{copy_hint}\n\nCuando hayas realizado el pago, pulsa «Ya realicé el pago».",
+            f"🔑 LLAVE PIX · PIX {pix_kind.upper()}{legacy_suffix}\n<code>{html.escape(legacy_key)}</code>\n\n{copy_hint}\n\nCopia la llave y realiza el pago en tu aplicación bancaria. Cuando realices el pago, pulsa «Ya realicé el pago».",
             parse_mode="HTML", reply_markup=pix_keyboard
         )
         with db() as con:
