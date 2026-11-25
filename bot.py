@@ -871,11 +871,12 @@ async def lists_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(summary, parse_mode="Markdown", reply_markup=keyboard)
 
 
-def build_welcome_message(current_count: int, user_name: str) -> str:
-    """Mensaje oficial de bienvenida, personalizado para cada nuevo usuario."""
+def build_welcome_message(current_count: int, user_name: str, user_id: int) -> str:
+    """Mensaje oficial de bienvenida con el nombre enlazado al perfil de Telegram."""
     safe_user_name = html.escape(user_name or "Participante")
+    clickable_user_name = f'<a href="tg://user?id={int(user_id)}"><b>{safe_user_name}</b></a>'
     return (
-        f"👋 ¡Bienvenido/a, <b>{safe_user_name}</b>!\n\n"
+        f"👋 ¡Bienvenido/a, {clickable_user_name}!\n\n"
         "ℹ️ <b>INFORMACIÓN DEL CANAL Y DE LAS RIFAS</b>\n\n"
         "Este canal informa sobre las listas de rifas, números confirmados, resultados y ganadores. Para elegir números y gestionar tus participaciones, utiliza los botones del chat privado del bot. La unión al canal es obligatoria para utilizar el bot.\n\n"
         "🎟️ <b>¿Cómo funciona?</b>\n"
@@ -926,7 +927,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not existing:
         welcome = build_welcome_message(
-            current_count, user.username or user.full_name or user.first_name or "Participante"
+            current_count, user.username or user.full_name or user.first_name or "Participante", user.id
         )
     else:
         welcome = (
@@ -1112,22 +1113,59 @@ async def publish_winner(update, context, raffle_id, number):
         )
         winner_id = cur.lastrowid
         con.execute("UPDATE raffles SET status='finished',closed_at=? WHERE id=?", (iso_now(), raffle_id))
-    msg = (
+        # Todos los usuarios que han iniciado el bot recibirán el resultado por privado.
+        recipient_ids = [int(r[0]) for r in con.execute(
+            "SELECT user_id FROM bot_users ORDER BY joined_at"
+        ).fetchall()]
+
+    # Mensaje exclusivo para el ganador: felicitación y botón para reclamar el premio.
+    winner_msg = (
         f"🎉 ¡FELICIDADES, {row['name']}! 🎉\n\n"
         f"🏆 Has sido el ganador del sorteo de la *{raffle['name']}*.\n"
         f"🎯 Número ganador: *{number:02d}*.\n"
         f"💰 *Monto del premio: {prize_amount_text}*\n\n"
         "Para recibir tu premio, solicita la entrega al administrador pulsando el botón de abajo."
     )
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🎁 Solicitar Premio al Administrador", callback_data=f"prizerequest:{winner_id}")]])
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(
+        "🎁 Solicitar Premio al Administrador", callback_data=f"prizerequest:{winner_id}"
+    )]])
+    winner_private_sent = False
     try:
-        sent = await context.bot.send_message(chat_id=row["user_id"], text=msg, parse_mode="Markdown", reply_markup=keyboard)
+        sent = await context.bot.send_message(
+            chat_id=row["user_id"], text=winner_msg,
+            parse_mode="Markdown", reply_markup=keyboard
+        )
         with db() as con:
-            con.execute("UPDATE winners SET group_message_id=?,prize_status='announced' WHERE id=?", (sent.message_id, winner_id))
+            con.execute(
+                "UPDATE winners SET group_message_id=?,prize_status='announced' WHERE id=?",
+                (sent.message_id, winner_id)
+            )
+        winner_private_sent = True
     except Exception:
-        log.exception("No se pudo enviar el resultado al ganador en privado")
-        await update.effective_message.reply_text("El ganador quedó registrado, pero no pude enviarle el mensaje privado. El usuario debe iniciar el bot con /start.")
-        return
+        log.exception("No se pudo enviar la felicitación privada al ganador")
+
+    # Resultado informativo para todos los demás usuarios registrados, sin felicitación
+    # y sin el botón de reclamación. Un fallo individual no detiene el resto del envío.
+    public_result_msg = (
+        f"🏆 RESULTADO DE LA RIFA\n\n"
+        f"🎟️ Lista: {raffle['name']}\n"
+        f"🎯 Número ganador: {number:02d}\n"
+        f"👤 Usuario ganador: {row['name']}\n"
+        f"💰 Total del premio: {prize_amount_text}"
+    )
+    broadcast_sent = 0
+    broadcast_failed = 0
+    for user_id in recipient_ids:
+        if user_id == int(row["user_id"]):
+            continue  # El ganador ya recibió su mensaje personalizado.
+        try:
+            await context.bot.send_message(chat_id=user_id, text=public_result_msg)
+            broadcast_sent += 1
+        except Exception:
+            broadcast_failed += 1
+            log.info("No se pudo enviar el resultado de la rifa al usuario %s", user_id, exc_info=True)
+        await asyncio.sleep(0.05)
+
     if CHANNEL_CHAT_ID:
         try:
             channel_msg = await context.bot.send_message(
@@ -1144,8 +1182,15 @@ async def publish_winner(update, context, raffle_id, number):
                 con.execute("UPDATE winners SET channel_message_id=? WHERE id=?", (channel_msg.message_id, winner_id))
         except Exception:
             log.exception("No se pudo publicar ganador en el canal configurado")
+
     audit("winner", f"Rifa #{raffle_id}, número {number}, usuario {row['user_id']}", update.effective_user.id)
-    await update.effective_message.reply_text("✅ Resultado enviado al chat privado del ganador.")
+    total_others = max(0, len(recipient_ids) - (1 if int(row["user_id"]) in recipient_ids else 0))
+    winner_status = "Se envió la felicitación al ganador" if winner_private_sent else "No se pudo enviar el privado al ganador"
+    await update.effective_message.reply_text(
+        f"✅ Resultado publicado en el canal.\n{winner_status}.\n"
+        f"📨 Avisos privados enviados a {broadcast_sent} de {total_others} usuarios; "
+        f"fallidos: {broadcast_failed}."
+    )
 
 
 async def winner_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3307,7 +3352,7 @@ async def welcome_channel_member(update: Update, context: ContextTypes.DEFAULT_T
     if is_now_member and not was_member:
         try:
             info_text = build_welcome_message(
-                after_count, member.username or member.full_name or member.first_name or "Participante"
+                after_count, member.username or member.full_name or member.first_name or "Participante", member.id
             )
             await context.bot.send_message(
                 chat_id=CHANNEL_CHAT_ID, text=info_text, parse_mode="HTML"
