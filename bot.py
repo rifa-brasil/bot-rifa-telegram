@@ -779,12 +779,12 @@ def raffle_name_keyboard():
     """Opciones de nombres predefinidos para crear una lista con un toque."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"Lista {n}", callback_data=f"createlistname:{n}")]
-        for n in range(1, 6)
+        for n in range(1, 10)
     ])
 
 
 def raffle_percent_keyboard():
-    values = (60, 65, 70, 75, 80)
+    values = (60, 65, 70, 75, 80, 85)
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"{v}%", callback_data=f"createpercent:{v}") for v in values[i:i+3]]
         for i in range(0, len(values), 3)
@@ -886,7 +886,7 @@ def build_welcome_message(current_count: int, user_name: str, user_id: int) -> s
         "• Mientras los 100 números de una lista no estén ocupados y los pagos confirmados, no existe resultado ganador para esa lista. No se anuncia ni se determina un ganador antes de completar esas condiciones.\n"
         "• Una vez completada la lista, el sorteo se basa en el resultado nocturno de <b>Florida Pick 3</b>. Si se completa antes de las 10:30pm, se utiliza el sorteo nocturno de ese día; si se completa después, se utiliza el de la noche siguiente.\n\n"
         "🏆 <b>Premio</b>\n\n"
-        "El premio anunciado para cada lista corresponde entre el 60% – 80% de la recaudación total, según el porcentaje definido para cada lista. Ejemplo: 100 números a R$ 10 generan R$ 1.000 y un premio de R$ 600 a R$ 800, según la lista escogida por el usuario; cada lista tendrá información del valor de cada número y del premio.\n\n"
+        "El premio anunciado para cada lista corresponde entre el 60% – 85% de la recaudación total, según el porcentaje definido para cada lista. Ejemplo: 100 números a R$ 10 generan R$ 1.000 y un premio de R$ 600 a R$ 850, según la lista escogida por el usuario; cada lista tendrá información del valor de cada número y del premio.\n\n"
         "🔎 <b>Verificación del resultado</b>\n\n"
         "En el menú fijo encontrarás el botón para descargar la aplicación y consultar el resultado de Florida Pick 3.\n\n"
         f"👥 <b>Usuarios Registrados:</b> muestra el número actual de usuarios registrados en el bot y miembros del canal. El mínimo de referencia es de 100 para que las listas sean desbloqueadas y puedan realizar sus jugadas; el administrador habilita o bloquea las jugadas manualmente.\n\n"
@@ -1005,18 +1005,18 @@ async def new_raffle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(
             "Uso: /nueva Nombre de lista|15|70\n"
             "Precios permitidos: 10, 15, 20, 25, 30, 35, 40, 45 o 50. "
-            "Porcentajes permitidos: 60, 70 u 80."
+            "Porcentajes permitidos: 60, 65, 70, 75, 80 u 85."
         )
         return
     try:
         name, price_text, percent_text = parts
         price = Decimal(price_text.replace(",", "."))
         percent = Decimal(percent_text.replace("%", "").replace(",", "."))
-        if not name or len(name) > 100 or price not in {Decimal(x) for x in (10,15,20,25,30,35,40,45,50)} or percent not in {Decimal(60),Decimal(65),Decimal(70),Decimal(75),Decimal(80)}:
+        if not name or len(name) > 100 or price not in {Decimal(x) for x in (10,15,20,25,30,35,40,45,50)} or percent not in {Decimal(60),Decimal(65),Decimal(70),Decimal(75),Decimal(80),Decimal(85)}:
             raise ValueError()
         amount = (price * Decimal("100") * percent / Decimal("100")).quantize(Decimal("0.01"))
         amount_fmt = f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        prize_value = f"R$ {amount_fmt} ({percent}% do total)"
+        prize_value = f"R$ {amount_fmt} ({percent}% del total)"
         group = DEFAULT_GROUP_ID
         if group == 0:
             await update.effective_message.reply_text("El ID del grupo configurado (GROUP_CHAT_ID) es 0. Configúralo en el entorno del bot.")
@@ -1806,7 +1806,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         try:
             index = int(data.split(":", 1)[1])
-            if index not in range(1, 6):
+            if index not in range(1, 10):
                 raise ValueError
         except ValueError:
             await q.answer("Nombre de lista inválido.", show_alert=True)
@@ -1847,7 +1847,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await q.message.reply_text(admin_flow_prompt("percent"), parse_mode="Markdown", reply_markup=raffle_percent_keyboard())
                 return
             percent = Decimal(data.split(":", 1)[1])
-            if percent not in {Decimal(60), Decimal(65), Decimal(70), Decimal(75), Decimal(80)} or flow.get("step") != "percent":
+            if percent not in {Decimal(60), Decimal(65), Decimal(70), Decimal(75), Decimal(80), Decimal(85)} or flow.get("step") != "percent":
                 raise ValueError()
             group = DEFAULT_GROUP_ID
             if group == 0:
@@ -1855,7 +1855,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             amount = (Decimal(str(flow["price"])) * Decimal("100") * percent / Decimal("100")).quantize(Decimal("0.01"))
             amount_fmt = f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            prize_value = f"R$ {amount_fmt} ({percent}% do total)"
+            prize_value = f"R$ {amount_fmt} ({percent}% del total)"
             with db() as con:
                 if con.execute("SELECT 1 FROM raffles WHERE lower(trim(name))=lower(trim(?))", (flow["name"],)).fetchone():
                     await q.answer("Ese nombre ya fue utilizado. Inicia otra lista con un nombre diferente.", show_alert=True)
@@ -3338,11 +3338,15 @@ async def welcome_channel_member(update: Update, context: ContextTypes.DEFAULT_T
         await notify_member_count(context, after_count)
     elif not known and is_now_member and not was_member:
         try:
+            admin_clickable_name = (
+                f'<a href="tg://user?id={int(member.id)}"><b>{html.escape(member.username and "@" + member.username or member.full_name or member.first_name or "Usuario")}</b></a>'
+            )
             await context.bot.send_message(
                 ADMIN_ID,
-                f"👤 Nuevo miembro del canal: {member.first_name or 'Usuario'} (ID {member.id}).\n"
+                f"👤 Nuevo miembro del canal: {admin_clickable_name} (ID <code>{member.id}</code>).\n"
                 f"Todavía no ha iniciado el bot; no se suma al contador hasta que pulse /start.\n"
-                f"👥 Usuarios elegibles actuales: {after_count} · mínimo de referencia: 100."
+                f"👥 Usuarios elegibles actuales: {after_count} · mínimo de referencia: 100.",
+                parse_mode="HTML"
             )
         except Exception:
             log.exception("No se pudo avisar al administrador del nuevo miembro del canal")
