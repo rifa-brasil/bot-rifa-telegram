@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 27
+Bot de rifas Telegram - versión 35
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -21,6 +21,7 @@ import random
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -55,12 +56,8 @@ PORT = int(os.getenv("PORT", "10000"))
 RESERVATION_MINUTES = 5  # Primera ventana: 5 min para realizar el pago
 PAY_BUTTON_MINUTES = 5   # Compatibilidad; el botón de pago no caduca
 CURRENCY = "R$"  # Todos los valores de la rifa se expresan en reales brasileños
-# Añadir las llaves cuando el administrador las facilite: (nombre visible, llave PIX).
-PIX_KEYS = [
-    ("PIX teléfono", "11948824359"),
-    ("PIX correo 1", "yordanisreyes@gmail.com"),
-    ("PIX correo 2", "yordanismydan@gmail.com"),
-]
+BACKUP_DIR = os.getenv("BACKUP_DIR", str(Path(DB_PATH).expanduser().parent / "backups"))
+BACKUP_TIMEZONE = os.getenv("BACKUP_TIMEZONE", "America/Sao_Paulo")
 FLORIDA_PICK3_PDF = "https://files.floridalottery.com/exptkt/p3.pdf"
 FLORIDA_PICK3_ANDROID_URL = "https://play.google.com/store/apps/details?id=com.flalottery.FLALOTTERY"
 FLORIDA_PICK3_IOS_URL = "https://apps.apple.com/us/app/florida-lottery/id476160599"
@@ -299,14 +296,26 @@ def init_db():
         WHEN EXISTS (SELECT 1 FROM raffles WHERE id<>NEW.id AND lower(trim(name))=lower(trim(NEW.name)))
         BEGIN SELECT RAISE(ABORT, 'duplicate_raffle_name'); END;
         """)
-        # Migra las llaves PIX que estaban configuradas en el código a la gestión del panel.
-        for legacy_label, legacy_key in PIX_KEYS:
+        # Versión 35: las llaves PIX se registran exclusivamente desde el panel.
+        # Limpia una sola vez las llaves heredadas de versiones anteriores; no vuelve
+        # a borrarlas en reinicios posteriores.
+        pix_reset = con.execute(
+            "SELECT setting_value FROM bot_settings WHERE setting_key='pix_manual_reset_v35'"
+        ).fetchone()
+        if not pix_reset:
+            con.execute("DELETE FROM pix_keys")
+            con.execute("DELETE FROM bot_settings WHERE setting_key IN ('pix_rotation_remaining','pix_rotation_last')")
             con.execute(
-                "INSERT OR IGNORE INTO pix_keys(label,key_text,active,created_at) VALUES(?,?,1,?)",
-                (legacy_label, legacy_key, iso_now())
+                "INSERT INTO bot_settings(setting_key,setting_value) VALUES('pix_manual_reset_v35','1')"
             )
         # El administrador controla manualmente si se aceptan nuevas jugadas.
         con.execute("INSERT OR IGNORE INTO bot_settings(setting_key,setting_value) VALUES('playing_enabled','0')")
+        eligible_now = int(con.execute("SELECT COUNT(*) FROM bot_users WHERE channel_member=1").fetchone()[0])
+        play_setting = con.execute("SELECT setting_value FROM bot_settings WHERE setting_key='playing_enabled'").fetchone()
+        if eligible_now < 100 and play_setting and play_setting[0] == '0':
+            # Corrige listas antiguas que figuraban como activas aunque el sistema
+            # general no permitía jugar: pasan a bloqueadas y dejan de mostrarse.
+            con.execute("UPDATE raffles SET status='blocked' WHERE status='active'")
         # No se borran listas al arrancar: init_db solo crea/migra tablas y conserva los registros.
 
 
@@ -416,8 +425,16 @@ def admin_user_count_keyboard(count):
 
 
 async def update_admin_counter(context, count=None):
-    """No crea mensajes sueltos: el contador se integra en el teclado del panel."""
-    return
+    """Actualiza el teclado persistente del administrador con el contador actual."""
+    try:
+        current = eligible_user_count() if count is None else int(count)
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"👥 Usuarios registrados: {current}",
+            reply_markup=admin_keyboard()
+        )
+    except Exception:
+        log.info("No se pudo actualizar automáticamente el contador del panel admin", exc_info=True)
 
 
 async def update_user_counters(context, count=None):
@@ -768,7 +785,6 @@ def admin_keyboard():
             [KeyboardButton("📊 Estadísticas"), KeyboardButton("🏆 Indicar Número Ganador")],
             [KeyboardButton("🔄 Resetear lista"), KeyboardButton("🗑️ Borrar lista")],
             [KeyboardButton("👥 Historial"), KeyboardButton("🔑 Gestionar llaves PIX")],
-            [KeyboardButton("🔄 Actualizar panel")],
             [KeyboardButton("🔒 Bloquear jugadas"), KeyboardButton("🔓 Desbloquear jugadas")],
             [KeyboardButton("💾 Crear respaldo"), KeyboardButton("♻️ Restaurar respaldo")],
         ],
@@ -826,13 +842,19 @@ def next_random_pix_key():
 
 
 def pix_keys_keyboard():
-    # Flatten list of rows generated above.
-    rows = [[InlineKeyboardButton("➕ Agregar llave PIX", callback_data="pixkeys:add")]]
-    rows.extend(
-        [[InlineKeyboardButton(f"🗑️ {r['label']} · {r['key_text'][:22]}", callback_data=f"pixkeys:delete:{r['id']}")]
-         for r in get_pix_keys()]
-    )
-    rows.append([InlineKeyboardButton("⬅️ Volver al panel", callback_data="admin:back")])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Agregar llave PIX", callback_data="pixkeys:add")],
+        [InlineKeyboardButton("🗑️ Eliminar llave PIX", callback_data="pixkeys:delete_menu")],
+        [InlineKeyboardButton("⬅️ Volver al panel", callback_data="admin:back")]
+    ])
+
+
+def pix_keys_delete_keyboard(keys):
+    rows = [
+        [InlineKeyboardButton(f"🗑️ {r['label']} · {r['key_text'][:22]}", callback_data=f"pixkeys:delete:{r['id']}")]
+        for r in keys
+    ]
+    rows.append([InlineKeyboardButton("⬅️ Volver a llaves PIX", callback_data="pixkeys:menu")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -897,6 +919,9 @@ def raffle_locked_until_prize_received(con, raffle_id):
 
 
 def active_raffles(group_id):
+    # Las listas bloqueadas o con el bloqueo general activo no se muestran a participantes.
+    if not is_playing_enabled():
+        return []
     with db() as con:
         rows = con.execute(
             "SELECT * FROM raffles WHERE group_id=? AND status='active' ORDER BY id",
@@ -1090,6 +1115,7 @@ async def new_raffle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = (price * Decimal("100") * percent / Decimal("100")).quantize(Decimal("0.01"))
         amount_fmt = f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         prize_value = f"R$ {amount_fmt} ({percent}% del total)"
+        initial_status = "active" if eligible_user_count() >= 100 else "blocked"
         group = DEFAULT_GROUP_ID
         if group == 0:
             await update.effective_message.reply_text("El ID del grupo configurado (GROUP_CHAT_ID) es 0. Configúralo en el entorno del bot.")
@@ -1100,8 +1126,8 @@ async def new_raffle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             cur = con.execute(
                 """INSERT INTO raffles(name,group_id,total_numbers,price,prize,prize_value,status,created_at)
-                   VALUES(?,?,100,?,'Premio entregado mediante transferencia PIX',?, 'active',?)""",
-                (name, group, float(price), prize_value, iso_now())
+                   VALUES(?,?,100,?,'Premio entregado mediante transferencia PIX',?,?,?)""",
+                (name, group, float(price), prize_value, initial_status, iso_now())
             )
             rid = cur.lastrowid
             con.executemany(
@@ -1358,6 +1384,12 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             rows = [dict(r) for r in con.execute(
                 "SELECT id,name,status FROM raffles WHERE status=? ORDER BY id", (target_status,)
             ).fetchall()]
+            if action == "unblock" and not is_playing_enabled() and not rows:
+                # Compatibilidad con listas activas antiguas que estaban ocultas
+                # únicamente por el interruptor global.
+                rows = [dict(r) for r in con.execute(
+                    "SELECT id,name,status FROM raffles WHERE status='active' ORDER BY id"
+                ).fetchall()]
         if not rows:
             await msg.reply_text(
                 "No hay listas disponibles para " + verb + ".",
@@ -1388,30 +1420,20 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     if action == "pixkeys":
         context.user_data.pop("awaiting_pix_key_input", None)
         keys = get_pix_keys()
-        summary = "\\n".join(
+        summary = "\n".join(
             f"{i}. {r['label']}: {r['key_text']}" for i, r in enumerate(keys, 1)
         ) or "Todavía no has registrado llaves PIX."
         await msg.reply_text(
-            "🔑 GESTIÓN DE LLAVES PIX\\n\\n"
-            f"Llaves activas: {len(keys)}\\n{summary}\\n\\n"
-            "Agrega las llaves aquí. El bot las distribuirá aleatoriamente sin repetir "
-            "ninguna hasta completar la ronda.",
+            "🔑 GESTIÓN DE LLAVES PIX\n\n"
+            f"Llaves activas: {len(keys)}\n{summary}\n\n"
+            "Usa «Agregar llave PIX» para registrar una llave o «Eliminar llave PIX» "
+            "para retirar una que ya no quieras utilizar. El bot distribuirá las llaves "
+            "aleatoriamente sin repetir ninguna hasta completar la ronda.",
             reply_markup=pix_keys_keyboard()
         )
         return
     if action == "users":
         await msg.reply_text("📊 BARRA INFORMATIVA\n" + participant_progress_label() + "\n\n👥 ESTADO DE PARTICIPANTES\n" + play_status_text(), reply_markup=admin_keyboard())
-        return
-    if action == "back":
-        with db() as con:
-            total = con.execute("SELECT COUNT(*) FROM raffles").fetchone()[0]
-            active = con.execute("SELECT COUNT(*) FROM raffles WHERE status='active'").fetchone()[0]
-        await msg.reply_text(
-            f"🔄 Panel actualizado.\nListas guardadas: {total} · Listas activas: {active}\n"
-            f"Base de datos: {Path(DB_PATH).expanduser().resolve()}\n"
-            "La actualización del panel no reinicia ni borra las listas.",
-            reply_markup=admin_keyboard()
-        )
         return
     if action == "create":
         context.user_data["admin_flow"] = {"kind": "create", "step": "name"}
@@ -1510,12 +1532,7 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 + [[InlineKeyboardButton("⬅️ Volver al panel", callback_data="admin:back")]]
             )
             await msg.reply_text("Selecciona la lista cuyo historial de jugadas deseas revisar:", reply_markup=keyboard)
-    elif action == "back":
-        context.user_data.pop("admin_flow", None)
-        await msg.reply_text(
-            "⚙️ *PANEL DE ADMINISTRACIÓN*\nSelecciona una operación:",
-            parse_mode="Markdown", reply_markup=admin_keyboard()
-        )
+
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1526,10 +1543,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Registro de llaves PIX desde el panel de administración.
     if is_admin(update.effective_user.id) and context.user_data.get("awaiting_pix_key_input"):
-        if "|" not in text:
-            await msg.reply_text("Formato incorrecto. Envía: Nombre de la llave|Valor de la llave PIX")
+        separator = "/" if "/" in text else ("|" if "|" in text else None)
+        if not separator:
+            await msg.reply_text("Formato incorrecto. Envía: Nombre de la llave/Valor de la llave PIX")
             return
-        label, key_text = [part.strip() for part in text.split("|", 1)]
+        label, key_text = [part.strip() for part in text.split(separator, 1)]
         if not label or not key_text or len(label) > 50 or len(key_text) > 200:
             await msg.reply_text("Nombre o llave inválidos. Máximo 50 caracteres para el nombre y 200 para la llave.")
             return
@@ -1971,6 +1989,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             amount = (Decimal(str(flow["price"])) * Decimal("100") * percent / Decimal("100")).quantize(Decimal("0.01"))
             amount_fmt = f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
             prize_value = f"R$ {amount_fmt} ({percent}% del total)"
+            initial_status = "active" if eligible_user_count() >= 100 else "blocked"
             with db() as con:
                 if con.execute("SELECT 1 FROM raffles WHERE lower(trim(name))=lower(trim(?))", (flow["name"],)).fetchone():
                     await q.answer("Ese nombre ya fue utilizado. Inicia otra lista con un nombre diferente.", show_alert=True)
@@ -1978,8 +1997,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
                 cur = con.execute(
                     """INSERT INTO raffles(name,group_id,total_numbers,price,prize,prize_value,status,created_at)
-                       VALUES(?,?,100,?,'Premio entregado mediante transferencia PIX',?,'active',?)""",
-                    (flow["name"], group, flow["price"], prize_value, iso_now())
+                       VALUES(?,?,100,?,'Premio entregado mediante transferencia PIX',?,?,?)""",
+                    (flow["name"], group, flow["price"], prize_value, initial_status, iso_now())
                 )
                 rid = cur.lastrowid
                 con.executemany(
@@ -2125,15 +2144,32 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Solo el administrador puede gestionar las llaves PIX.", show_alert=True)
             return
         parts = data.split(":")
+        if parts[1] == "menu":
+            keys = get_pix_keys()
+            summary = "\n".join(f"{i}. {r['label']}: {r['key_text']}" for i, r in enumerate(keys, 1)) or "Todavía no has registrado llaves PIX."
+            await q.answer()
+            await q.message.reply_text(
+                f"🔑 GESTIÓN DE LLAVES PIX\n\nLlaves activas: {len(keys)}\n{summary}",
+                reply_markup=pix_keys_keyboard()
+            )
+            return
         if parts[1] == "add":
             context.user_data["awaiting_pix_key_input"] = True
             await q.answer("Envía los datos de la llave.")
             await q.message.reply_text(
-                "➕ REGISTRAR LLAVE PIX\\n\\n"
-                "Envía un solo mensaje con este formato:\\n"
-                "Nombre de la llave|Valor de la llave PIX\\n\\n"
-                "Ejemplo: PIX teléfono|11999999999"
+                "➕ REGISTRAR LLAVE PIX\n\n"
+                "Envía un solo mensaje con este formato:\n"
+                "Nombre de la llave/Valor de la llave PIX\n\n"
+                "Ejemplo: PIX correo 1/correo@ejemplo.com"
             )
+            return
+        if parts[1] == "delete_menu":
+            keys = get_pix_keys()
+            await q.answer()
+            if not keys:
+                await q.message.reply_text("No hay llaves PIX registradas para eliminar.", reply_markup=pix_keys_keyboard())
+            else:
+                await q.message.reply_text("Selecciona la llave PIX que deseas eliminar:", reply_markup=pix_keys_delete_keyboard(keys))
             return
         if parts[1] == "delete" and len(parts) == 3:
             try:
@@ -2153,9 +2189,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await q.answer("Esa llave ya no existe.", show_alert=True)
             keys = get_pix_keys()
-            summary = "\\n".join(f"{i}. {r['label']}: {r['key_text']}" for i, r in enumerate(keys, 1)) or "Todavía no hay llaves registradas."
+            summary = "\n".join(f"{i}. {r['label']}: {r['key_text']}" for i, r in enumerate(keys, 1)) or "Todavía no hay llaves registradas."
             await q.message.reply_text(
-                f"🔑 LLAVES PIX ACTIVAS: {len(keys)}\\n\\n{summary}",
+                f"🔑 LLAVES PIX ACTIVAS: {len(keys)}\n\n{summary}",
                 reply_markup=pix_keys_keyboard()
             )
             return
@@ -2189,12 +2225,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not req or req["status"] not in {"key_requested", "awaiting_button"}:
             await q.answer("La solicitud ya no está disponible.", show_alert=True)
             return
-        if not PIX_KEYS:
-            await q.answer("Aún no hay llaves PIX configuradas.", show_alert=True)
-            await q.message.reply_text("⚙️ No hay llaves PIX configuradas. Cuando me proporciones las llaves, aparecerán aquí para seleccionarlas y enviarlas con un toque.")
+        keys = get_pix_keys()
+        if not keys:
+            await q.answer("Aún no hay llaves PIX registradas.", show_alert=True)
+            await q.message.reply_text("🔑 No hay llaves PIX registradas. Entra en «Gestionar llaves PIX» para agregarlas manualmente.")
             return
-        buttons = [[InlineKeyboardButton(f"{label} · {key_text}", callback_data=f"pixkey:{i}:{user_id}:{req_id}")]
-                   for i, (label, key_text) in enumerate(PIX_KEYS)]
+        buttons = [[InlineKeyboardButton(f"{key['label']} · {key['key_text']}", callback_data=f"pixkey:{key['id']}:{user_id}:{req_id}")] for key in keys]
         await q.answer("Selecciona la llave PIX.")
         await q.message.reply_text("🔑 Selecciona la llave PIX que deseas enviar:", reply_markup=InlineKeyboardMarkup(buttons))
         return
@@ -2204,14 +2240,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Solo el administrador puede enviar llaves PIX.", show_alert=True)
             return
         try:
-            _, idx, user_text, req_id = data.split(":", 3)
+            _, key_id_text, user_text, req_id = data.split(":", 3)
+            key_id = int(key_id_text)
             user_id = int(user_text)
-            label, key_text = PIX_KEYS[int(idx)]
         except (ValueError, IndexError):
             await q.answer("Opción de llave inválida.", show_alert=True)
             return
         with db() as con:
+            key_row = con.execute("SELECT label,key_text FROM pix_keys WHERE id=? AND active=1", (key_id,)).fetchone()
             req = con.execute("SELECT * FROM requests WHERE id=? AND user_id=?", (req_id, user_id)).fetchone()
+        if not key_row:
+            await q.answer("La llave PIX ya no está activa.", show_alert=True)
+            return
+        label, key_text = key_row["label"], key_row["key_text"]
         if not req or req["status"] not in {"key_requested", "awaiting_button"}:
             await q.answer("La solicitud ya no está disponible.", show_alert=True)
             return
@@ -2223,22 +2264,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )])
             copy_hint = "Pulsa el botón con la llave para copiarla y pegarla en tu aplicación bancaria."
         except (ImportError, TypeError):
-            # Compatibilidad con versiones antiguas de python-telegram-bot.
             copy_hint = "Mantén pulsada la llave para copiarla si tu Telegram no ofrece el botón de copiar."
         pix_keyboard_rows.append([InlineKeyboardButton("💵 Ya realicé el pago", callback_data=f"userpaid:{req_id}")])
         pix_keyboard = InlineKeyboardMarkup(pix_keyboard_rows)
         pix_kind = "teléfono" if "tel" in label.lower() else "correo"
-        legacy_key_raw = str(key_text).strip()
-        legacy_parts = legacy_key_raw.split("\n\n", 1)
-        legacy_suffix = ""
-        if len(legacy_parts) == 2 and legacy_parts[0].strip().isdigit():
-            legacy_suffix = f" {legacy_parts[0].strip()}"
-            legacy_key = legacy_parts[1].strip()
-        else:
-            legacy_key = legacy_key_raw
+        legacy_key = str(key_text).strip()
         key_msg = await context.bot.send_message(
             user_id,
-            f"🔑 LLAVE PIX · PIX {pix_kind.upper()}{legacy_suffix}\n<code>{html.escape(legacy_key)}</code>\n\n{copy_hint}\n\nCopia la llave y realiza el pago en tu aplicación bancaria. Cuando realices el pago, pulsa «Ya realicé el pago».",
+            f"🔑 LLAVE PIX · PIX {pix_kind.upper()}\n<code>{html.escape(legacy_key)}</code>\n\n{copy_hint}\n\nCopia la llave y realiza el pago en tu aplicación bancaria. Cuando realices el pago, pulsa «Ya realicé el pago».",
             parse_mode="HTML", reply_markup=pix_keyboard
         )
         with db() as con:
@@ -2671,6 +2704,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ).fetchall()]
                 cur = con.execute("UPDATE raffles SET status=? WHERE status=?", (new_status, old_status))
                 changed = cur.rowcount
+                if not block_action and changed == 0 and not is_playing_enabled():
+                    unlocked_names = [r["name"] for r in con.execute(
+                        "SELECT name FROM raffles WHERE status='active' ORDER BY id"
+                    ).fetchall()]
+                    changed = len(unlocked_names)
                 label = "todas las listas"
             else:
                 try:
@@ -2679,10 +2717,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await q.answer("Lista no válida.", show_alert=True)
                     return
                 row = con.execute("SELECT name,status FROM raffles WHERE id=?", (raffle_id,)).fetchone()
-                if not row or row["status"] != old_status:
+                valid_status = row and (row["status"] == old_status or (not block_action and row["status"] == "active" and not is_playing_enabled()))
+                if not valid_status:
                     await q.answer("La lista ya no está disponible para esta acción.", show_alert=True)
                     return
-                con.execute("UPDATE raffles SET status=? WHERE id=?", (new_status, raffle_id))
+                if row["status"] == old_status:
+                    con.execute("UPDATE raffles SET status=? WHERE id=?", (new_status, raffle_id))
                 changed = 1
                 label = f"{row['name']} (#{raffle_id})"
                 if not block_action:
@@ -3023,6 +3063,60 @@ async def send_backup(update, context):
         return
     await send_excel(update, context)
     await send_json(update, context)
+
+
+def create_database_backup():
+    """Crea una copia SQLite consistente en la carpeta de respaldos del servidor."""
+    try:
+        tz = ZoneInfo(BACKUP_TIMEZONE)
+    except Exception:
+        tz = ZoneInfo("America/Sao_Paulo")
+    now_local = datetime.now(tz)
+    backup_dir = Path(BACKUP_DIR).expanduser()
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"Respado Rifa_ {now_local.strftime('%d-%m-%y')}.sqlite3"
+    backup_path = backup_dir / filename
+    source_path = Path(DB_PATH).expanduser()
+    source = sqlite3.connect(str(source_path), timeout=30)
+    destination = sqlite3.connect(str(backup_path), timeout=30)
+    try:
+        source.backup(destination)
+        destination.commit()
+    finally:
+        destination.close()
+        source.close()
+    return backup_path
+
+
+async def daily_database_backup(app: Application):
+    """Ejecuta el respaldo todos los días a las 06:00 en BACKUP_TIMEZONE."""
+    try:
+        tz = ZoneInfo(BACKUP_TIMEZONE)
+    except Exception:
+        log.exception("Zona horaria BACKUP_TIMEZONE inválida; se usará America/Sao_Paulo")
+        tz = ZoneInfo("America/Sao_Paulo")
+    while True:
+        now = datetime.now(tz)
+        next_run = now.replace(hour=6, minute=0, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(days=1)
+        await asyncio.sleep(max(1, (next_run - now).total_seconds()))
+        try:
+            backup_path = create_database_backup()
+            with backup_path.open("rb") as backup_file:
+                await app.bot.send_document(
+                    chat_id=ADMIN_ID,
+                    document=InputFile(backup_file, filename=backup_path.name),
+                    caption=(
+                        "💾 COPIA DE SEGURIDAD AUTOMÁTICA\n\n"
+                        f"Fecha: {datetime.now(tz).strftime('%d-%m-%y')}\n"
+                        "La base de datos SQLite completa también quedó guardada en la carpeta de respaldos del servidor."
+                    )
+                )
+            log.info("Copia de seguridad diaria creada y enviada: %s", backup_path)
+        except Exception:
+            log.exception("No se pudo crear o enviar la copia de seguridad diaria")
+
 
 
 async def send_excel(update, context):
@@ -3474,10 +3568,11 @@ def db_raffles_for_draw():
 async def post_init(app: Application):
     asyncio.create_task(expire_reservations(app))
     asyncio.create_task(pick3_monitor(app))
+    asyncio.create_task(daily_database_backup(app))
     try:
         await app.bot.send_message(
             chat_id=ADMIN_ID,
-            text="⚙️ PANEL DE ADMINISTRACIÓN\nEl panel está listo. Usa estos botones para administrar las rifas:",
+            text="⚙️ PANEL DE ADMINISTRACIÓN\nEl panel está listo. El contador se actualiza automáticamente:",
             reply_markup=admin_keyboard()
         )
     except Exception:
@@ -3654,7 +3749,6 @@ ADMIN_MENU_ACTIONS = {
     "🔓 Desbloquear jugadas": "unblock",
     "🚫 Bloquear usuario": "block_user",
     "✅ Desbloquear usuario": "unblock_user",
-    "🔄 Actualizar panel": "back",
 }
 
 def channel_join_keyboard():
