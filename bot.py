@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 35
+Bot de rifas Telegram - versión 38
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -863,7 +863,7 @@ def admin_back_keyboard():
 
 
 def raffle_price_keyboard():
-    values = [10, 15, 20, 25, 30, 35, 40, 45, 50]
+    values = [10, 15, 20, 25, 30, 35]
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"R$ {v}", callback_data=f"createprice:{v}") for v in values[i:i+3]]
         for i in range(0, len(values), 3)
@@ -872,7 +872,7 @@ def raffle_price_keyboard():
 
 def raffle_name_keyboard():
     """Opciones de nombres predefinidos para crear una lista con un toque."""
-    values = list(range(1, 10))
+    values = list(range(1, 7))
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"Lista {n}", callback_data=f"createlistname:{n}") for n in values[i:i+3]]
         for i in range(0, len(values), 3)
@@ -962,7 +962,6 @@ async def lists_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔴 *Números ocupados:* {st['occupied']}\n"
             f"🟡 *Números pendientes:* {st['pending']}\n"
             f"🟢 *Números libres:* {st['available']}\n"
-            f"💰 *Total recaudado:* {st['revenue']:.2f} {CURRENCY}\n"
             f"📊 *Progreso:* {progress_bar(st['occupied'] + st['pending'], st['total'])}\n"
             f"📌 *Estado:* {raffle.get('status', 'active').upper()}"
         )
@@ -1103,7 +1102,7 @@ async def new_raffle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(parts) != 3:
         await update.effective_message.reply_text(
             "Uso: /nueva Nombre de lista|15|70\n"
-            "Precios permitidos: 10, 15, 20, 25, 30, 35, 40, 45 o 50. "
+            "Precios permitidos: 10, 15, 20, 25, 30 o 35. "
             "Porcentajes permitidos: 60, 65, 70, 75, 80 u 85."
         )
         return
@@ -1111,7 +1110,7 @@ async def new_raffle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name, price_text, percent_text = parts
         price = Decimal(price_text.replace(",", "."))
         percent = Decimal(percent_text.replace("%", "").replace(",", "."))
-        if not name or len(name) > 100 or price not in {Decimal(x) for x in (10,15,20,25,30,35,40,45,50)} or percent not in {Decimal(60),Decimal(65),Decimal(70),Decimal(75),Decimal(80),Decimal(85)}:
+        if not name or len(name) > 100 or price not in {Decimal(x) for x in (10,15,20,25,30,35)} or percent not in {Decimal(60),Decimal(65),Decimal(70),Decimal(75),Decimal(80),Decimal(85)}:
             raise ValueError()
         amount = (price * Decimal("100") * percent / Decimal("100")).quantize(Decimal("0.01"))
         amount_fmt = f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -1213,10 +1212,19 @@ async def publish_winner(update, context, raffle_id, number):
         )
         winner_id = cur.lastrowid
         con.execute("UPDATE raffles SET status='finished',closed_at=? WHERE id=?", (iso_now(), raffle_id))
-        # Todos los usuarios que han iniciado el bot recibirán el resultado por privado.
-        recipient_ids = [int(r[0]) for r in con.execute(
-            "SELECT user_id FROM bot_users ORDER BY joined_at"
-        ).fetchall()]
+        # Destinatarios: usuarios registrados en el bot y cualquier participante
+        # asociado a esta lista (jugadas, compras o solicitudes), sin duplicados.
+        # Esto evita dejar fuera a usuarios que participaron pero cuyo registro
+        # no aparece actualmente en bot_users.
+        recipient_rows = con.execute(
+            """SELECT user_id FROM bot_users
+               UNION SELECT user_id FROM numbers WHERE raffle_id=? AND user_id IS NOT NULL
+               UNION SELECT user_id FROM purchases WHERE raffle_id=?
+               UNION SELECT user_id FROM requests WHERE raffle_id=?
+               ORDER BY user_id""",
+            (raffle_id, raffle_id, raffle_id)
+        ).fetchall()
+        recipient_ids = [int(r[0]) for r in recipient_rows if r[0] is not None]
 
     # El nombre del ganador enlaza a su perfil de Telegram en todos los mensajes.
     winner_mention = (
@@ -1263,16 +1271,41 @@ async def publish_winner(update, context, raffle_id, number):
     broadcast_sent = 0
     broadcast_failed = 0
     winner_user_id = int(row["user_id"])
-    for user_id in recipient_ids:
-        if int(user_id) == winner_user_id:
-            continue
-        try:
-            await context.bot.send_message(chat_id=user_id, text=public_result_msg, parse_mode="HTML")
-            broadcast_sent += 1
-        except Exception:
+    broadcast_targets = [user_id for user_id in recipient_ids if user_id != winner_user_id]
+    for user_id in broadcast_targets:
+        delivered = False
+        # Telegram puede imponer límites temporales (RetryAfter). Reintenta
+        # el mismo destinatario en vez de saltarlo y continuar con el siguiente.
+        for attempt in range(3):
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id, text=public_result_msg, parse_mode="HTML"
+                )
+                broadcast_sent += 1
+                delivered = True
+                break
+            except Exception as exc:
+                retry_after = getattr(exc, "retry_after", None)
+                if retry_after is not None and attempt < 2:
+                    try:
+                        wait_seconds = float(retry_after.total_seconds())
+                    except AttributeError:
+                        wait_seconds = float(retry_after)
+                    await asyncio.sleep(max(1.0, wait_seconds) + 0.5)
+                    continue
+                log.warning(
+                    "No se pudo enviar el resultado de la lista %s al usuario %s (intento %s): %s",
+                    raffle_id, user_id, attempt + 1, exc, exc_info=True
+                )
+                break
+        if not delivered:
             broadcast_failed += 1
-            log.info("No se pudo enviar el resultado de la rifa al usuario %s", user_id, exc_info=True)
-        await asyncio.sleep(0.05)
+        # Ritmo conservador para evitar que Telegram limite el envío masivo.
+        await asyncio.sleep(0.1)
+    log.info(
+        "Resultado de la lista %s: %s enviados, %s fallidos, %s destinatarios (ganador excluido)",
+        raffle_id, broadcast_sent, broadcast_failed, len(broadcast_targets)
+    )
 
     if CHANNEL_CHAT_ID:
         try:
@@ -1942,7 +1975,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         try:
             index = int(data.split(":", 1)[1])
-            if index not in range(1, 10):
+            if index not in range(1, 7):
                 raise ValueError
         except ValueError:
             await q.answer("Nombre de lista inválido.", show_alert=True)
@@ -1974,7 +2007,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             if data.startswith("createprice:"):
                 price = Decimal(data.split(":", 1)[1])
-                if price not in {Decimal(x) for x in (10,15,20,25,30,35,40,45,50)} or flow.get("step") != "price":
+                if price not in {Decimal(x) for x in (10,15,20,25,30,35)} or flow.get("step") != "price":
                     raise ValueError()
                 flow["price"] = float(price)
                 flow["step"] = "percent"
