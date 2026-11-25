@@ -1250,8 +1250,8 @@ async def publish_winner(update, context, raffle_id, number):
     except Exception:
         log.exception("No se pudo enviar la felicitación privada al ganador")
 
-    # Aviso informativo para todos los usuarios registrados, incluido el ganador.
-    # Solo el mensaje privado anterior contiene la felicitación y el botón de reclamar.
+    # Aviso informativo exclusivo para quienes NO ganaron.
+    # El ganador ya recibió su felicitación privada y no debe recibir este aviso.
     public_result_msg = (
         f"🏆 <b>RESULTADO DE LA RIFA</b>\n\n"
         f"🎟️ Lista: <b>{html.escape(str(raffle['name']))}</b>\n"
@@ -1262,7 +1262,10 @@ async def publish_winner(update, context, raffle_id, number):
     )
     broadcast_sent = 0
     broadcast_failed = 0
+    winner_user_id = int(row["user_id"])
     for user_id in recipient_ids:
+        if int(user_id) == winner_user_id:
+            continue
         try:
             await context.bot.send_message(chat_id=user_id, text=public_result_msg, parse_mode="HTML")
             broadcast_sent += 1
@@ -2927,20 +2930,42 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Lista no encontrada.", show_alert=True)
             return
         await q.answer()
+        with db() as con:
+            winner_info = con.execute(
+                "SELECT user_id,name,number,announced_at FROM winners WHERE raffle_id=? ORDER BY id DESC LIMIT 1",
+                (raffle_id,)
+            ).fetchone()
+        raw_status = str(st["status"] or "active").lower()
+        if raw_status == "finished":
+            status_label = "🏁 FINALIZADA"
+        elif raw_status == "sold_out":
+            status_label = "⏳ CERRADA · EN ESPERA DEL RESULTADO"
+        else:
+            status_label = "🟢 ACTIVA"
+        closed_at = raffle.get("closed_at")
+        closed_text = str(closed_at).replace("T", " ")[:19] if closed_at else "Todavía no se ha cerrado"
+        if winner_info:
+            winner_name = html.escape(str(winner_info["name"] or "Participante"))
+            winner_link = f'<a href="tg://user?id={int(winner_info["user_id"])}"><b>{winner_name}</b></a>'
+            winner_line = f"🏆 <b>Usuario ganador:</b> {winner_link} · Número <b>{int(winner_info['number']):02d}</b>\n"
+        else:
+            winner_line = "🏆 <b>Usuario ganador:</b> Aún no hay ganador\n"
         await q.message.reply_text(
-            f"📊 *ESTADÍSTICAS · {st['name']} (#{raffle_id})*\n\n"
-            f"🔢 *Número total:* {st['total']}\n"
-            f"💵 *Valor por número:* {st['price']:.2f} {CURRENCY}\n"
-            f"🏆 *Premio:* {raffle['prize'] or 'Por anunciar'}\n"
-            f"💎 *Valor del premio:* {raffle.get('prize_value') or 'Por definir'}\n"
-            f"🔴 *Números ocupados:* {st['occupied']}\n"
-            f"🟡 *Números pendientes:* {st['pending']}\n"
-            f"🟢 *Números libres:* {st['available']}\n"
-            f"💰 *Total recaudado (pagos aprobados):* {st['revenue']:.2f} {CURRENCY}\n"
-            f"📊 *Progreso:* {progress_bar(st['occupied'] + st['pending'], st['total'])}\n"
-            f"📌 *Estado:* {st['status'].upper()}\n"
-            f"👥 *Grupo:* {st['group_id']}",
-            parse_mode="Markdown", reply_markup=admin_back_keyboard()
+            f"📊 <b>ESTADÍSTICAS · {html.escape(str(st['name']))} (#{raffle_id})</b>\n\n"
+            f"🔢 <b>Número total:</b> {st['total']}\n"
+            f"💵 <b>Valor por número:</b> {st['price']:.2f} {CURRENCY}\n"
+            f"🎁 <b>Premio:</b> {html.escape(str(raffle['prize'] or 'Por anunciar'))}\n"
+            f"💎 <b>Valor del premio:</b> {html.escape(str(raffle.get('prize_value') or 'Por definir'))}\n"
+            f"🔴 <b>Números ocupados:</b> {st['occupied']}\n"
+            f"🟡 <b>Números pendientes:</b> {st['pending']}\n"
+            f"🟢 <b>Números libres:</b> {st['available']}\n"
+            f"💰 <b>Total recaudado (pagos aprobados):</b> {st['revenue']:.2f} {CURRENCY}\n"
+            f"📊 <b>Progreso:</b> {progress_bar(st['occupied'] + st['pending'], st['total'])}\n"
+            f"📌 <b>Estado:</b> {status_label}\n"
+            f"🕒 <b>Fecha y hora de cierre:</b> {html.escape(closed_text)}\n"
+            f"{winner_line}"
+            f"👥 <b>Grupo:</b> <code>{st['group_id']}</code>",
+            parse_mode="HTML", reply_markup=admin_back_keyboard()
         )
         return
 
@@ -3255,10 +3280,11 @@ async def send_history(update, context, raffle_id):
         status = str(row["status"]).upper()
         timestamp = str(row["play_created_at"] or "Fecha no registrada").replace("T", " ")[:19]
         receipt = "Adjunto registrado" if row["payment_receipt_file_id"] else "Sin captura registrada"
+        winner_badge = " 🏆 <b>¡USUARIO GANADOR DEL PREMIO!</b>" if winning_record else ""
         body = (
             "🧾 <b>REGISTRO DE JUGADA</b>\n\n"
             f"📅 <b>Fecha y hora:</b> {html.escape(timestamp)}\n"
-            f"👤 <b>Nombre Usuario:</b> <a href=\"tg://user?id={int(row['user_id'])}\">{html.escape(display)}</a>\n"
+            f"👤 <b>Nombre Usuario:</b> <a href=\"tg://user?id={int(row['user_id'])}\">{html.escape(display)}</a>{winner_badge}\n"
             f"🎟️ <b>Nombre de la lista:</b> {html.escape(row['raffle_name'])}\n"
             f"🔢 <b>Números jugados:</b> {html.escape(numbers)}\n"
             f"💰 <b>Importe de la jugada:</b> {format_brl(row['history_amount'])}\n"
@@ -3271,11 +3297,11 @@ async def send_history(update, context, raffle_id):
             prize_name = str(raffle["prize"] or "Premio de la rifa")
             prize_detail = str(raffle["prize_value"] or prize_amount_text)
             body += (
-                "\\n\\n🏆 <b>¡USUARIO GANADOR DEL PREMIO!</b>\\n"
-                f"📅 <b>Fecha del resultado:</b> {html.escape(winner_date)}\\n"
-                f"🎁 <b>Premio ganado:</b> {html.escape(prize_name)}\\n"
-                f"💰 <b>Valor del premio:</b> {html.escape(prize_amount_text)}\\n"
-                f"📋 <b>Detalle configurado:</b> {html.escape(prize_detail)}\\n"
+                "\n\n"
+                f"📅 <b>Fecha del resultado:</b> {html.escape(winner_date)}\n"
+                f"🎁 <b>Premio ganado:</b> {html.escape(prize_name)}\n"
+                f"💰 <b>Valor del premio:</b> {html.escape(prize_amount_text)}\n"
+                f"📋 <b>Detalle configurado:</b> {html.escape(prize_detail)}\n"
                 f"🔢 <b>Número ganador:</b> {int(winning_record['number']):02d}"
             )
         buttons = [
