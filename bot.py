@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 38
+Bot de rifas Telegram - versión 40
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -48,10 +48,44 @@ BOT_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
 DEFAULT_GROUP_ID = int(os.getenv("GROUP_CHAT_ID", "0"))
 CHANNEL_CHAT_ID = int(os.getenv("CHANNEL_CHAT_ID", "0"))  # ID numérico del canal
+# Se actualiza directamente desde Telegram Bot API; None hasta la primera consulta.
+CHANNEL_MEMBER_COUNT = None
 CHANNEL_JOIN_URL = "https://t.me/+sRdEndX3bwszY2Ix"  # Enlace de acceso proporcionado
-# DB_PATH debe apuntar a un disco persistente del proveedor de hosting.
-# Si no se configura, se conserva el archivo local existente en el directorio de trabajo.
-DB_PATH = os.getenv("DB_PATH", "rifas.sqlite3")
+# En Render, el disco persistente debe montarse normalmente en /var/data.
+# Si DB_PATH no se define, usamos esa ubicación en Render y el archivo local fuera de Render.
+# IMPORTANTE: /var/data solo es persistente si el servicio tiene un Persistent Disk montado allí.
+_IS_RENDER = bool(os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER", "").lower() in {"1", "true", "yes"})
+_DEFAULT_DB_PATH = "/var/data/rifas.sqlite3" if _IS_RENDER else "rifas.sqlite3"
+DB_PATH = os.getenv("DB_PATH", _DEFAULT_DB_PATH)
+Path(DB_PATH).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+
+def migrate_legacy_database_if_needed():
+    """Copia la SQLite anterior a la ruta persistente si el destino aún no existe."""
+    target = Path(DB_PATH).expanduser().resolve()
+    if target.exists() and target.stat().st_size > 0:
+        return
+    candidates = [Path("rifas.sqlite3"), Path("/opt/render/project/src/rifas.sqlite3")]
+    for source in candidates:
+        try:
+            source = source.expanduser().resolve()
+            if not source.is_file() or source == target or source.stat().st_size == 0:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source_conn = sqlite3.connect(f"file:{source}?mode=ro", uri=True, timeout=30)
+            target_conn = sqlite3.connect(str(target), timeout=30)
+            try:
+                source_conn.backup(target_conn)
+            finally:
+                target_conn.close()
+                source_conn.close()
+            log.warning(
+                "Base de datos anterior migrada automáticamente de %s a %s",
+                source, target
+            )
+            return
+        except Exception:
+            log.exception("No se pudo migrar la base de datos anterior desde %s", source)
+
 PORT = int(os.getenv("PORT", "10000"))
 RESERVATION_MINUTES = 5  # Primera ventana: 5 min para realizar el pago
 PAY_BUTTON_MINUTES = 5   # Compatibilidad; el botón de pago no caduca
@@ -310,12 +344,13 @@ def init_db():
             )
         # El administrador controla manualmente si se aceptan nuevas jugadas.
         con.execute("INSERT OR IGNORE INTO bot_settings(setting_key,setting_value) VALUES('playing_enabled','0')")
-        eligible_now = int(con.execute("SELECT COUNT(*) FROM bot_users WHERE channel_member=1").fetchone()[0])
-        play_setting = con.execute("SELECT setting_value FROM bot_settings WHERE setting_key='playing_enabled'").fetchone()
-        if eligible_now < 100 and play_setting and play_setting[0] == '0':
-            # Corrige listas antiguas que figuraban como activas aunque el sistema
-            # general no permitía jugar: pasan a bloqueadas y dejan de mostrarse.
-            con.execute("UPDATE raffles SET status='blocked' WHERE status='active'")
+        # El número de miembros no se calcula desde SQLite. Tras conectar con Telegram,
+        # refresh_channel_member_count() consulta getChatMemberCount y aplica el mínimo.
+        local_user_rows = int(con.execute("SELECT COUNT(*) FROM bot_users").fetchone()[0])
+        log.info(
+            "Base local cargada: %s perfiles del bot; el contador oficial del canal se consultará a Telegram. DB=%s",
+            local_user_rows, Path(DB_PATH).expanduser().resolve()
+        )
         # No se borran listas al arrancar: init_db solo crea/migra tablas y conserva los registros.
 
 
@@ -396,7 +431,7 @@ def set_playing_enabled(enabled):
 def participant_progress_label():
     """Texto compacto y no interactivo para informar el avance hacia 100 usuarios."""
     count = eligible_user_count()
-    return f"Cantidad usuarios: {count} Registrados"
+    return f"Miembros del canal: {count}"
 
 
 def play_status_text():
@@ -430,7 +465,7 @@ async def update_admin_counter(context, count=None):
         current = eligible_user_count() if count is None else int(count)
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"👥 Usuarios registrados: {current}",
+            text=f"👥 Miembros del canal: {current}",
             reply_markup=admin_keyboard()
         )
     except Exception:
@@ -504,7 +539,7 @@ async def notify_user_ready(context, user_id, count):
             chat_id=int(user_id),
             text=(
                 "🎉 ¡YA SE ALCANZÓ EL MÍNIMO DE 100 USUARIOS!\n\n"
-                f"La comunidad tiene {count} usuarios registrados en el bot y miembros del canal. "
+                f"La comunidad tiene {count} usuarios registrados en el bot. "
                 "El administrador recibió el aviso para desbloquear las jugadas. Te notificaremos cuando "
                 "las habilite; mientras tanto puedes consultar las listas y su disponibilidad."
             ),
@@ -531,28 +566,85 @@ async def notify_threshold_reached(context, count):
     log.info("Aviso de umbral enviado a %s de %s usuarios elegibles", sent, len(user_ids))
 
 
-async def sync_known_channel_members(bot):
-    """Reconcilia el estado real de los usuarios ya registrados al iniciar el bot."""
+async def refresh_channel_member_count(bot, enforce_minimum=True):
+    """Consulta a Telegram el total real de miembros del canal, sin contar la BD."""
+    global CHANNEL_MEMBER_COUNT
     if not CHANNEL_CHAT_ID:
-        return
-    before_count = eligible_user_count()
+        log.error("No se puede consultar el total de miembros: CHANNEL_CHAT_ID no está configurado.")
+        return None
+    try:
+        count = int(await bot.get_chat_member_count(chat_id=CHANNEL_CHAT_ID))
+        CHANNEL_MEMBER_COUNT = count
+        log.info("Telegram informa %s miembros en el canal %s.", count, CHANNEL_CHAT_ID)
+        if enforce_minimum and count < 100:
+            set_playing_enabled(False)
+            with db() as con:
+                con.execute("UPDATE raffles SET status='blocked' WHERE status='active'")
+            log.warning(
+                "CANAL CON MENOS DE 100 MIEMBROS (%s): jugadas deshabilitadas y listas activas bloqueadas.",
+                count
+            )
+        return count
+    except Exception:
+        log.exception("No se pudo consultar el total de miembros del canal mediante Telegram.")
+        # No reemplazamos el último dato válido por cero ante un error temporal.
+        return CHANNEL_MEMBER_COUNT
+
+
+async def channel_member_count_monitor(bot):
+    """Refresca el total directamente desde Telegram cada cinco minutos."""
+    while True:
+        await asyncio.sleep(300)
+        await refresh_channel_member_count(bot)
+
+
+async def sync_known_channel_members(bot):
+    """Revisa automáticamente al arrancar a TODOS los usuarios ya registrados.
+
+    El total registrado se conserva aunque la API de Telegram falle al consultar
+    la membresía del canal. channel_member solo se actualiza cuando la consulta
+    devuelve un resultado concluyente.
+    """
     with db() as con:
-        user_ids = [int(r[0]) for r in con.execute("SELECT user_id FROM bot_users").fetchall()]
+        user_ids = [int(r[0]) for r in con.execute(
+            "SELECT user_id FROM bot_users ORDER BY joined_at"
+        ).fetchall()]
+    registered_total = len(user_ids)
+    if not CHANNEL_CHAT_ID:
+        log.warning(
+            "Arranque: se encontraron %s usuarios registrados. No se pudo verificar el canal "
+            "porque CHANNEL_CHAT_ID no está configurado; los registros se conservaron.",
+            registered_total
+        )
+        return
+
+    verified = 0
+    api_errors = 0
     for user_id in user_ids:
         try:
             allowed, reason = await channel_access_status(bot, user_id)
-            if not str(reason).startswith("api_error:") and reason != "config_missing":
-                with db() as con:
-                    con.execute(
-                        "UPDATE bot_users SET channel_member=? WHERE user_id=?",
-                        (1 if allowed else 0, user_id)
-                    )
+            if str(reason).startswith("api_error:") or reason == "config_missing":
+                api_errors += 1
+                continue
+            with db() as con:
+                con.execute(
+                    "UPDATE bot_users SET channel_member=? WHERE user_id=?",
+                    (1 if allowed else 0, user_id)
+                )
+            if allowed:
+                verified += 1
         except Exception:
+            api_errors += 1
             log.exception("No se pudo sincronizar membresía del usuario %s", user_id)
-    after_count = eligible_user_count()
-    if before_count < 100 <= after_count:
-        await notify_member_count(type("Context", (), {"bot": bot})(), after_count)
-    log.info("Sincronización de canal terminada: %s usuarios elegibles", after_count)
+        # Evita ráfagas excesivas de consultas a Telegram en bases grandes.
+        await asyncio.sleep(0.03)
+
+    total_after = eligible_user_count()
+    log.info(
+        "RECONCILIACIÓN DE ARRANQUE: %s usuarios registrados encontrados; "
+        "%s miembros del canal verificados; %s consultas con error; contador=%s.",
+        registered_total, verified, api_errors, total_after
+    )
 
 
 async def channel_access_status(bot, user_id):
@@ -592,13 +684,19 @@ async def channel_diagnostic_cmd(update: Update, context: ContextTypes.DEFAULT_T
         bot_member = await context.bot.get_chat_member(CHANNEL_CHAT_ID, context.bot.id)
         status = bot_member.status
         bot_admin = status in {"administrator", "creator"}
+        with db() as con:
+            verified_channel_members = int(con.execute(
+                "SELECT COUNT(*) FROM bot_users WHERE channel_member=1"
+            ).fetchone()[0])
         await update.effective_message.reply_text(
             "🔎 DIAGNÓSTICO DEL CANAL\n"
             f"Canal detectado: {chat.title or 'sin título'}\n"
             f"ID configurado: {CHANNEL_CHAT_ID}\n"
             f"Estado del bot: {status}\n"
             f"Bot administrador: {'sí' if bot_admin else 'NO'}\n"
-            f"Usuarios elegibles (iniciaron el bot y siguen en el canal): {eligible_user_count()} · mínimo de referencia: 100\n\n"
+            f"Miembros actuales del canal (consulta directa a Telegram): {eligible_user_count()}\n"
+            f"De ellos, miembros del canal verificados: {verified_channel_members}\n"
+            "Mínimo para mantener las listas habilitables: 100\n\n"
             + ("✅ El bot ve el canal y tiene permisos de administrador." if bot_admin else
                "⚠️ Añade el bot como administrador del canal y vuelve a ejecutar /diagnostico_canal.")
         )
@@ -632,7 +730,7 @@ def user_keyboard():
         [
             [KeyboardButton(f"👥 Usuarios Registrados ({count})")],
             [KeyboardButton("🎟️ Ver listas activas"), KeyboardButton("🎟️ Mis jugadas")],
-            [KeyboardButton("💳 Historial de pagos"), KeyboardButton("🏆 Mis premios")],
+            [KeyboardButton("🏆 Mis premios")],
             [KeyboardButton("📚 Resultados y ganadores"), KeyboardButton("🆘 Ayuda / soporte")],
             [KeyboardButton("📲 Descargar aplicación")],
         ],
@@ -987,7 +1085,7 @@ def build_welcome_message(current_count: int, user_name: str, user_id: int) -> s
         "El premio anunciado para cada lista corresponde entre el 60% – 85% de la recaudación total, según el porcentaje definido para cada lista. Ejemplo: 100 números a R$ 10 generan R$ 1.000 y un premio de R$ 600 a R$ 850, según la lista escogida por el usuario; cada lista tendrá información del valor de cada número y del premio.\n\n"
         "🔎 <b>Verificación del resultado</b>\n\n"
         "En el menú fijo encontrarás el botón para descargar la aplicación y consultar el resultado de Florida Pick 3.\n\n"
-        f"👥 <b>Usuarios Registrados:</b> muestra el número actual de usuarios registrados en el bot y miembros del canal. El mínimo de referencia es de 100 para que las listas sean desbloqueadas y puedan realizar sus jugadas; el administrador habilita o bloquea las jugadas manualmente.\n\n"
+        f"👥 <b>Usuarios Registrados:</b> muestra el número total de usuarios registrados en el bot. El mínimo de referencia es de 100 para que las listas sean desbloqueadas y puedan realizar sus jugadas; el administrador habilita o bloquea las jugadas manualmente.\n\n"
         "📌 Cada botón del menú principal abre directamente la consulta correspondiente, sin submenús."
     )
 
@@ -1029,7 +1127,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         welcome = (
-            f"¡Hola de nuevo! Actualmente hay {current_count} usuarios registrados en el bot y miembros del canal. "
+            f"¡Hola de nuevo! Actualmente hay {current_count} usuarios registrados en el bot. "
             "Puedes revisar las listas y consultar tus datos. El mínimo de referencia es 100, pero el administrador puede habilitar manualmente las jugadas para pruebas. "
             "Recuerda que no hay resultado ganador hasta que los 100 números de una lista estén ocupados y los pagos confirmados."
         )
@@ -1751,7 +1849,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         direct_actions = {
             "🎟️ Mis jugadas": "plays",
-            "💳 Historial de pagos": "payments",
             "🏆 Mis premios": "prizes",
             "📚 Resultados y ganadores": "history",
         }
@@ -1839,7 +1936,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_playing_enabled():
             await msg.reply_text(
                 "🔒 *LAS JUGADAS ESTÁN BLOQUEADAS POR EL ADMINISTRADOR*\n\n"
-                f"Actualmente hay {eligible} usuario(s) registrados y miembros del canal. "
+                f"Actualmente hay {eligible} usuario(s) registrados en el bot. "
                 "Puedes consultar las listas, pero no reservar números hasta que el administrador desbloquee las jugadas.",
                 parse_mode="Markdown", reply_markup=user_keyboard()
             )
@@ -3683,6 +3780,9 @@ async def welcome_channel_member(update: Update, context: ContextTypes.DEFAULT_T
     if member.id == context.bot.id:
         return
 
+    # El contador oficial viene del canal en Telegram, no de la tabla bot_users.
+    await refresh_channel_member_count(context.bot)
+
     old_status = change.old_chat_member.status
     new_status = change.new_chat_member.status
     is_now_member = (
@@ -3717,7 +3817,7 @@ async def welcome_channel_member(update: Update, context: ContextTypes.DEFAULT_T
                 ADMIN_ID,
                 f"👤 Nuevo miembro del canal: {admin_clickable_name} (ID <code>{member.id}</code>).\n"
                 f"Todavía no ha iniciado el bot; no se suma al contador hasta que pulse /start.\n"
-                f"👥 Usuarios elegibles actuales: {after_count} · mínimo de referencia: 100.",
+                f"👥 Usuarios registrados en el bot: {after_count} · mínimo de referencia: 100.",
                 parse_mode="HTML"
             )
         except Exception:
@@ -3821,11 +3921,9 @@ def channel_join_keyboard():
     ])
 
 def eligible_user_count():
-    """Usuarios que iniciaron el bot y cuya membresía actual en el canal fue verificada."""
-    with db() as con:
-        return int(con.execute(
-            "SELECT COUNT(*) FROM bot_users WHERE channel_member=1"
-        ).fetchone()[0])
+    """Total de miembros del canal informado por Telegram; BD solo como respaldo inicial."""
+    return int(CHANNEL_MEMBER_COUNT) if CHANNEL_MEMBER_COUNT is not None else 0
+
 
 async def start_web_server():
     async def health(_request):
@@ -3842,8 +3940,16 @@ async def start_web_server():
 async def main():
     if not BOT_TOKEN or not ADMIN_ID:
         raise RuntimeError("Configura TELEGRAM_TOKEN y ADMIN_TELEGRAM_ID en las variables de entorno.")
+    migrate_legacy_database_if_needed()
     init_db()
-    log.info("Base SQLite activa: %s", Path(DB_PATH).expanduser().resolve())
+    resolved_db_path = Path(DB_PATH).expanduser().resolve()
+    log.info("Base SQLite activa: %s", resolved_db_path)
+    if _IS_RENDER and not str(resolved_db_path).startswith("/var/data/"):
+        log.warning(
+            "DB_PATH no apunta a /var/data. En Render configura un Persistent Disk "
+            "montado en /var/data y DB_PATH=/var/data/rifas.sqlite3 para conservar "
+            "usuarios, listas y pagos entre despliegues."
+        )
     if not CHANNEL_CHAT_ID:
         log.warning("CHANNEL_CHAT_ID no configurado: publicaciones públicas de jugadas/ganador/comprobante desactivadas.")
     await start_web_server()
@@ -3899,7 +4005,12 @@ async def main():
         await app.start()
         # post_init no se ejecuta al usar initialize/start manualmente.
         await post_init(app)
-        await sync_known_channel_members(app.bot)
+        # Consulta el total real del canal directamente a Telegram en cada reinicio.
+        startup_registered = await refresh_channel_member_count(app.bot)
+        if startup_registered is None:
+            log.error("No se pudo obtener el contador del canal al arrancar; se conserva el respaldo local.")
+        # Mantiene el contador actualizado aunque no entren ni salgan usuarios.
+        asyncio.create_task(channel_member_count_monitor(app.bot))
         startup_context = type("Context", (), {"bot": app.bot})()
         await update_admin_counter(startup_context)
         await update_user_counters(startup_context)
