@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 42
+Bot de rifas Telegram - versión 44
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -613,10 +613,21 @@ async def refresh_channel_member_count(bot, enforce_minimum=True):
 
 
 async def channel_member_count_monitor(bot):
-    """Refresca el total directamente desde Telegram cada cinco minutos."""
+    """Revisa el total del canal cada minuto como respaldo de los eventos inmediatos."""
     while True:
-        await asyncio.sleep(300)
-        await refresh_channel_member_count(bot)
+        await asyncio.sleep(60)
+        previous_count = eligible_user_count()
+        current_count = await refresh_channel_member_count(bot)
+        if current_count is not None and current_count != previous_count:
+            log.info("El contador cambió durante la comprobación automática: %s -> %s", previous_count, current_count)
+            try:
+                await bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"👥 Miembros del canal: {current_count}",
+                    reply_markup=admin_keyboard()
+                )
+            except Exception:
+                log.exception("No se pudo actualizar el contador del administrador tras la comprobación automática")
 
 
 async def sync_known_channel_members(bot):
@@ -749,9 +760,8 @@ def user_keyboard():
     count = eligible_user_count()
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(f"👥 Usuarios Registrados ({count})")],
-            [KeyboardButton("🎟️ Ver listas activas"), KeyboardButton("🎟️ Mis jugadas")],
-            [KeyboardButton("🏆 Mis premios")],
+            [KeyboardButton(f"👥 Usuarios Registrados ({count})"), KeyboardButton("🎟️ Ver listas activas")],
+            [KeyboardButton("🎟️ Mis jugadas"), KeyboardButton("🏆 Mis premios")],
             [KeyboardButton("📚 Resultados y ganadores"), KeyboardButton("🆘 Ayuda / soporte")],
             [KeyboardButton("📲 Descargar aplicación")],
         ],
@@ -3802,7 +3812,9 @@ async def welcome_channel_member(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     # El contador oficial viene del canal en Telegram, no de la tabla bot_users.
-    await refresh_channel_member_count(context.bot)
+    # Se guarda el valor anterior para actualizar el panel inmediatamente si cambia.
+    previous_count = eligible_user_count()
+    refreshed_count = await refresh_channel_member_count(context.bot)
 
     old_status = change.old_chat_member.status
     new_status = change.new_chat_member.status
@@ -3815,7 +3827,19 @@ async def welcome_channel_member(update: Update, context: ContextTypes.DEFAULT_T
         or (old_status == "restricted" and getattr(change.old_chat_member, "is_member", False))
     )
 
-    before_count = eligible_user_count()
+    # Respaldo de latencia: si Telegram ya entregó el evento pero su consulta
+    # getChatMemberCount todavía devuelve el valor anterior, aplicar el cambio
+    # del evento ahora. La siguiente consulta periódica reconciliará el total.
+    global CHANNEL_MEMBER_COUNT
+    if refreshed_count is not None and refreshed_count == previous_count and is_now_member != was_member:
+        CHANNEL_MEMBER_COUNT = max(0, previous_count + (1 if is_now_member else -1))
+        refreshed_count = CHANNEL_MEMBER_COUNT
+        log.info(
+            "Contador ajustado inmediatamente por evento chat_member (%s): %s",
+            "entrada" if is_now_member else "salida", refreshed_count
+        )
+
+    before_count = previous_count
     with db() as con:
         known = con.execute(
             "SELECT channel_member FROM bot_users WHERE user_id=?", (member.id,)
@@ -3827,8 +3851,37 @@ async def welcome_channel_member(update: Update, context: ContextTypes.DEFAULT_T
             )
     after_count = eligible_user_count()
 
+    # chat_member llega sin que el usuario tenga que pulsar ningún botón del bot.
+    # Si el total oficial cambió, reflejarlo inmediatamente en el panel admin.
+    if refreshed_count is not None and refreshed_count != previous_count:
+        if known and is_now_member and not bool(known["channel_member"]):
+            await notify_member_count(context, after_count)
+        else:
+            await update_admin_counter(context, after_count)
+
     if known and is_now_member and not bool(known["channel_member"]):
-        await notify_member_count(context, after_count)
+        # El contador ya se actualizó arriba; conservar aquí el aviso de umbral
+        # sin duplicar el mensaje del contador.
+        if refreshed_count is None or refreshed_count == previous_count:
+            await notify_member_count(context, after_count)
+        else:
+            if after_count >= 100:
+                with db() as con:
+                    already_notified = con.execute(
+                        "SELECT setting_value FROM bot_settings WHERE setting_key='minimum100_notified'"
+                    ).fetchone()
+                    if not already_notified or already_notified[0] != '1':
+                        con.execute(
+                            "INSERT INTO bot_settings(setting_key,setting_value) VALUES('minimum100_notified','1') "
+                            "ON CONFLICT(setting_key) DO UPDATE SET setting_value='1'"
+                        )
+                        await context.bot.send_message(
+                            ADMIN_ID,
+                            "🎉 ¡SE ALCANZÓ EL MÍNIMO DE 100 USUARIOS!\n\n"
+                            "Ya puedes desbloquear una lista o todas desde «🔓 Desbloquear jugadas». "
+                            "Al desbloquearlas, los participantes recibirán automáticamente un aviso.",
+                            reply_markup=admin_keyboard()
+                        )
     elif not known and is_now_member and not was_member:
         try:
             admin_clickable_name = (
