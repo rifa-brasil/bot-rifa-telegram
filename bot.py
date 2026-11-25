@@ -872,9 +872,10 @@ def raffle_price_keyboard():
 
 def raffle_name_keyboard():
     """Opciones de nombres predefinidos para crear una lista con un toque."""
+    values = list(range(1, 10))
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"Lista {n}", callback_data=f"createlistname:{n}")]
-        for n in range(1, 10)
+        [InlineKeyboardButton(f"Lista {n}", callback_data=f"createlistname:{n}") for n in values[i:i+3]]
+        for i in range(0, len(values), 3)
     ])
 
 
@@ -1225,10 +1226,10 @@ async def publish_winner(update, context, raffle_id, number):
 
     # Mensaje exclusivo para el ganador: felicitación y botón para reclamar el premio.
     winner_msg = (
-        f"🎉 ¡FELICIDADES, {winner_mention}! 🎉\\n\\n"
-        f"🏆 Has sido el ganador del sorteo de la <b>{html.escape(str(raffle['name']))}</b>.\\n"
-        f"🎯 Número ganador: <b>{number:02d}</b>.\\n"
-        f"💰 <b>Monto del premio: {html.escape(prize_amount_text)}</b>\\n\\n"
+        f"🎉 ¡FELICIDADES, {winner_mention}! 🎉\n\n"
+        f"🏆 Has sido el ganador del sorteo de la <b>{html.escape(str(raffle['name']))}</b>.\n"
+        f"🎯 Número ganador: <b>{number:02d}</b>.\n"
+        f"💰 <b>Monto del premio: {html.escape(prize_amount_text)}</b>\n\n"
         "Para recibir tu premio, solicita la entrega al administrador pulsando el botón de abajo."
     )
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(
@@ -1249,20 +1250,19 @@ async def publish_winner(update, context, raffle_id, number):
     except Exception:
         log.exception("No se pudo enviar la felicitación privada al ganador")
 
-    # Resultado informativo para todos los demás usuarios registrados, sin felicitación
-    # y sin el botón de reclamación. Un fallo individual no detiene el resto del envío.
+    # Aviso informativo para todos los usuarios registrados, incluido el ganador.
+    # Solo el mensaje privado anterior contiene la felicitación y el botón de reclamar.
     public_result_msg = (
-        f"🏆 <b>RESULTADO DE LA RIFA</b>\\n\\n"
-        f"🎟️ Lista: <b>{html.escape(str(raffle['name']))}</b>\\n"
-        f"🎯 Número ganador: <b>{number:02d}</b>\\n"
-        f"👤 Usuario ganador: {winner_mention}\\n"
-        f"💰 <b>Total del premio: {html.escape(prize_amount_text)}</b>"
+        f"🏆 <b>RESULTADO DE LA RIFA</b>\n\n"
+        f"🎟️ Lista: <b>{html.escape(str(raffle['name']))}</b>\n"
+        f"🎯 Número ganador: <b>{number:02d}</b>\n"
+        f"👤 Usuario ganador: {winner_mention}\n"
+        f"💰 <b>Total del premio: {html.escape(prize_amount_text)}</b>\n\n"
+        "<b>«¡EL PRÓXIMO GANADOR PUEDE SER USTED!»</b>"
     )
     broadcast_sent = 0
     broadcast_failed = 0
     for user_id in recipient_ids:
-        if user_id == int(row["user_id"]):
-            continue  # El ganador ya recibió su mensaje personalizado.
         try:
             await context.bot.send_message(chat_id=user_id, text=public_result_msg, parse_mode="HTML")
             broadcast_sent += 1
@@ -2114,13 +2114,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     (iso_now(), key_msg.message_id, req_id, uid)
                 )
             admin_text = (
-                "🔑 <b>LLAVE PIX ENVIADA AUTOMÁTICAMENTE</b>\\n\\n"
-                f"Solicitud: <code>{html.escape(req_id)}</code>\\n"
-                f"Lista: <b>{html.escape(raffle['name'] if raffle else str(req['raffle_id']))}</b>\\n"
-                f"Participante: <a href=\"tg://user?id={uid}\"><b>{html.escape(req['name'])}</b></a> "
-                f"(ID <code>{uid}</code>)\\n"
-                f"Números: <b>{html.escape(nums)}</b>\\n"
-                f"Llave asignada ({html.escape(pix['label'])}): <code>{html.escape(pix_key)}</code>"
+                "🔑 <b>LLAVE PIX ENVIADA AUTOMÁTICAMENTE</b>\n\n"
+                f"<b>Solicitud:</b> <code>{html.escape(str(req_id))}</code>\n"
+                f"<b>Lista:</b> {html.escape(raffle['name'] if raffle else str(req['raffle_id']))}\n\n"
+                "<b>Participante:</b>\n"
+                f'<a href="tg://user?id={uid}"><b>{html.escape(str(req["name"] or "Participante"))}</b></a>\n'
+                f"<b>ID del usuario:</b> <code>{uid}</code>\n\n"
+                "<b>Números que jugó:</b>\n"
+                f"<b>{html.escape(str(nums))}</b>\n\n"
+                "<b>Llave asignada:</b>\n"
+                f"{html.escape(str(pix['label']))}\n"
+                f"<code>{html.escape(str(pix_key))}</code>"
             )
             await context.bot.send_message(ADMIN_ID, admin_text, parse_mode="HTML")
             await q.answer("¡Llave PIX enviada automáticamente!")
