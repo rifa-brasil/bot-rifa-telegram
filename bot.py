@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 45
+Bot de rifas Telegram - versión 47
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -50,6 +50,8 @@ DEFAULT_GROUP_ID = int(os.getenv("GROUP_CHAT_ID", "0"))
 CHANNEL_CHAT_ID = int(os.getenv("CHANNEL_CHAT_ID", "0"))  # ID numérico del canal
 # Se actualiza directamente desde Telegram Bot API; None hasta la primera consulta.
 CHANNEL_MEMBER_COUNT = None
+# Contador de respaldos en curso: durante ellos el monitor no debe cambiar el estado de las listas.
+BACKUP_IN_PROGRESS = 0
 CHANNEL_JOIN_URL = "https://t.me/+sRdEndX3bwszY2Ix"  # Enlace de acceso proporcionado
 # En Render, el disco persistente debe montarse normalmente en /var/data.
 # Si DB_PATH no se define, usamos esa ubicación en Render y el archivo local fuera de Render.
@@ -345,7 +347,8 @@ def init_db():
         # El administrador controla manualmente si se aceptan nuevas jugadas.
         con.execute("INSERT OR IGNORE INTO bot_settings(setting_key,setting_value) VALUES('playing_enabled','0')")
         # El número de miembros no se calcula desde SQLite. Tras conectar con Telegram,
-        # refresh_channel_member_count() consulta getChatMemberCount y aplica el mínimo.
+        # refresh_channel_member_count() consulta getChatMemberCount solo para informar;
+        # nunca bloquea ni desbloquea listas automáticamente.
         local_user_rows = int(con.execute("SELECT COUNT(*) FROM bot_users").fetchone()[0])
         log.info(
             "Base local cargada: %s perfiles del bot; el contador oficial del canal se consultará a Telegram. DB=%s",
@@ -598,12 +601,12 @@ async def refresh_channel_member_count(bot, enforce_minimum=True):
             "Telegram informa %s miembros; se excluyen %s cuentas (propietario detectado=%s). Total contabilizado=%s.",
             telegram_total, len(excluded_ids), owner_found, count
         )
-        if enforce_minimum and count < 100:
-            set_playing_enabled(False)
-            with db() as con:
-                con.execute("UPDATE raffles SET status='blocked' WHERE status='active'")
-            log.warning(
-                "CANAL CON MENOS DE 100 USUARIOS CONTABILIZABLES (%s): jugadas deshabilitadas y listas activas bloqueadas.",
+        # El contador es exclusivamente informativo: nunca debe cambiar el estado
+        # de las listas ni deshabilitar las jugadas. El administrador decide cuándo
+        # bloquear o desbloquear desde su panel, independientemente del total.
+        if count < 100:
+            log.info(
+                "Contador actualizado: %s usuarios contabilizables. No se bloquean listas automáticamente; el estado queda bajo control del administrador.",
                 count
             )
         return count
@@ -3247,14 +3250,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_backup(update, context):
+    """Envía las exportaciones sin alterar el estado de bloqueo de ninguna lista."""
+    global BACKUP_IN_PROGRESS
     if update.effective_chat.type != "private":
         if update.callback_query:
             await update.callback_query.answer("Abre el panel en privado para crear la copia.", show_alert=True)
         else:
             await update.effective_message.reply_text("Abre el panel en privado para crear la copia.")
         return
-    await send_excel(update, context)
-    await send_json(update, context)
+
+    # La marca se activa antes del primer await para cubrir también las consultas
+    # automáticas del contador que puedan coincidir con la generación de archivos.
+    BACKUP_IN_PROGRESS += 1
+    try:
+        await send_excel(update, context)
+        await send_json(update, context)
+    finally:
+        BACKUP_IN_PROGRESS = max(0, BACKUP_IN_PROGRESS - 1)
 
 
 def create_database_backup():
@@ -3293,6 +3305,8 @@ async def daily_database_backup(app: Application):
         if next_run <= now:
             next_run += timedelta(days=1)
         await asyncio.sleep(max(1, (next_run - now).total_seconds()))
+        global BACKUP_IN_PROGRESS
+        BACKUP_IN_PROGRESS += 1
         try:
             backup_path = create_database_backup()
             with backup_path.open("rb") as backup_file:
@@ -3308,6 +3322,8 @@ async def daily_database_backup(app: Application):
             log.info("Copia de seguridad diaria creada y enviada: %s", backup_path)
         except Exception:
             log.exception("No se pudo crear o enviar la copia de seguridad diaria")
+        finally:
+            BACKUP_IN_PROGRESS = max(0, BACKUP_IN_PROGRESS - 1)
 
 
 
