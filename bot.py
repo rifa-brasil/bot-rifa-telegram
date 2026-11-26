@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 50
+Bot de rifas Telegram - versión 52
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -1042,6 +1042,41 @@ def pix_keys_delete_keyboard(keys):
 def admin_back_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Volver al panel", callback_data="admin:back")]])
 
+def admin_list_grid_keyboard(raffles, prefix, icon="🎟️", include_back=True, extra_rows=None):
+    """Muestra listas administrativas en cuadrícula de dos columnas."""
+    buttons = [
+        InlineKeyboardButton(f"{icon} {r['name']} · #{r['id']}", callback_data=f"{prefix}:{r['id']}")
+        for r in raffles
+    ]
+    rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+    if extra_rows:
+        rows.extend(extra_rows)
+    if include_back:
+        rows.append([InlineKeyboardButton("⬅️ Volver al panel", callback_data="admin:back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def admin_active_list_info(raffle_id):
+    raffle = get_raffle(raffle_id)
+    if not raffle or raffle['status'] != 'active':
+        return None
+    st = stats(raffle_id)
+    return (
+        f"🎟️ *{raffle['name']}* (#{raffle_id})\n\n"
+        f"🔢 *Número total:* {st['total']}\n"
+        f"💵 *Valor por número:* {st['price']:.2f} {CURRENCY}\n"
+        f"🏆 *Premio:* {raffle['prize'] or 'Por anunciar'}\n"
+        f"💎 *Valor del premio:* {raffle.get('prize_value') or 'Por definir'}\n"
+        f"🔴 *Números ocupados:* {st['occupied']}\n"
+        f"🟡 *Números pendientes:* {st['pending']}\n"
+        f"🟢 *Números libres:* {st['available']}\n"
+        f"💰 *Total recaudado:* {st['revenue']:.2f} {CURRENCY}\n"
+        f"📊 *Progreso:* {progress_bar(st['occupied'] + st['pending'], st['total'])}\n"
+        f"📌 *Estado:* {raffle['status'].upper()}\n"
+        f"👥 *Grupo:* {raffle['group_id']}"
+    )
+
+
 
 def raffle_price_keyboard():
     values = [10, 15, 20, 25, 30, 35]
@@ -1790,10 +1825,9 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             return
         prefix = "raffleblock" if action == "block" else "raffleunblock"
         icon = "🔒" if action == "block" else "🔓"
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton(f"{icon} {r['name']} (#{r['id']})", callback_data=f"{prefix}:{r['id']}")] for r in rows]
-            + [[InlineKeyboardButton(f"{icon} Todas las listas", callback_data=f"{prefix}:all")],
-               [InlineKeyboardButton("⬅️ Cancelar", callback_data="admin:back")]]
+        keyboard = admin_list_grid_keyboard(
+            rows, prefix, icon,
+            extra_rows=[[InlineKeyboardButton(f"{icon} Todas las listas", callback_data=f"{prefix}:all")]]
         )
         await msg.reply_text(
             f"Selecciona la lista que deseas {verb}. También puedes elegir «Todas las listas».",
@@ -1838,25 +1872,11 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         if not rows:
             await msg.reply_text("No hay listas activas registradas.", reply_markup=admin_keyboard())
         else:
-            await msg.reply_text(f"📋 *LISTAS ACTIVAS · {len(rows)} LISTA(S)*", parse_mode="Markdown", reply_markup=admin_keyboard())
-            for item in rows:
-                st = stats(item["id"])
-                result = (
-                    f"🎟️ *{item['name']}* (#{item['id']})\n\n"
-                    f"🔢 *Número total:* {st['total']}\n"
-                    f"💵 *Valor por número:* {st['price']:.2f} {CURRENCY}\n"
-                    f"🏆 *Premio:* {item['prize'] or 'Por anunciar'}\n"
-                    f"💎 *Valor del premio:* {item.get('prize_value') or 'Por definir'}\n"
-                    f"🔴 *Números ocupados:* {st['occupied']}\n"
-                    f"🟡 *Números pendientes:* {st['pending']}\n"
-                    f"🟢 *Números libres:* {st['available']}\n"
-                    f"💰 *Total recaudado:* {st['revenue']:.2f} {CURRENCY}\n"
-                    f"📊 *Progreso:* {progress_bar(st['occupied'] + st['pending'], st['total'])}\n"
-                    f"📌 *Estado:* {item['status'].upper()}\n"
-                    f"👥 *Grupo:* {item['group_id']}"
-                )
-                await msg.reply_text(result, parse_mode="Markdown", reply_markup=edit_raffle_keyboard(item["id"]))
-                await asyncio.sleep(0.04)
+            await msg.reply_text(
+                f"📋 *LISTAS ACTIVAS · {len(rows)} LISTA(S)*\nSelecciona una lista para consultar sus datos:",
+                parse_mode="Markdown",
+                reply_markup=admin_list_grid_keyboard(rows, "adminactive", "📋")
+            )
     elif action == "stats":
         with db() as con:
             rows = [dict(r) for r in con.execute(
@@ -1865,10 +1885,7 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         if not rows:
             await msg.reply_text("No hay listas registradas.", reply_markup=admin_keyboard())
         else:
-            keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton(f"📊 {r['name']} (#{r['id']}) · {r['status']}", callback_data=f"adminstats:{r['id']}")] for r in rows]
-                + [[InlineKeyboardButton("⬅️ Volver al panel", callback_data="admin:back")]]
-            )
+            keyboard = admin_list_grid_keyboard(rows, "adminstats", "📊")
             await msg.reply_text("Selecciona cualquier lista para consultar sus estadísticas, estén abiertas o cerradas:", reply_markup=keyboard)
     elif action == "winner":
         with db() as con:
@@ -1878,9 +1895,7 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         if not rows:
             await msg.reply_text("No hay listas disponibles para declarar ganador.", reply_markup=admin_keyboard())
         else:
-            keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton(f"🏆 {r['name']} (#{r['id']})", callback_data=f"winnerchoose:{r['id']}")] for r in rows]
-            )
+            keyboard = admin_list_grid_keyboard(rows, "winnerchoose", "🏆")
             await msg.reply_text("¿En cuál lista vas a indicar el ganador?", reply_markup=keyboard)
     elif action == "reset":
         with db() as con:
@@ -1888,9 +1903,7 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         if not rows:
             await msg.reply_text("No hay listas registradas.", reply_markup=admin_keyboard())
         else:
-            keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton(f"🔄 {r['name']} (#{r['id']}) · {r['status']}", callback_data=f"resetchoose:{r['id']}")] for r in rows]
-            )
+            keyboard = admin_list_grid_keyboard(rows, "resetchoose", "🔄")
             await msg.reply_text(
                 "Selecciona la lista que deseas reiniciar. El historial de compras se conserva.",
                 reply_markup=keyboard
@@ -1901,9 +1914,7 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         if not rows:
             await msg.reply_text("No hay listas registradas.", reply_markup=admin_keyboard())
         else:
-            keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton(f"🗑️ {r['name']} (#{r['id']}) · {r['status']}", callback_data=f"deletechoose:{r['id']}")] for r in rows]
-            )
+            keyboard = admin_list_grid_keyboard(rows, "deletechoose", "🗑️")
             await msg.reply_text("Selecciona la lista que deseas borrar. Las listas completadas están protegidas hasta confirmar la entrega del premio.", reply_markup=keyboard)
     elif action == "backup":
         await send_backup(update, context)
@@ -1919,10 +1930,7 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         if not rows:
             await msg.reply_text("Todavía no hay listas registradas.", reply_markup=admin_keyboard())
         else:
-            keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton(f"📚 {r['name']} (#{r['id']}) · {r['status']}", callback_data=f"adminhistory:{r['id']}")] for r in rows]
-                + [[InlineKeyboardButton("⬅️ Volver al panel", callback_data="admin:back")]]
-            )
+            keyboard = admin_list_grid_keyboard(rows, "adminhistory", "📚")
             await msg.reply_text("Selecciona la lista cuyo historial de jugadas deseas revisar:", reply_markup=keyboard)
 
 
@@ -2426,6 +2434,7 @@ def number_picker_keyboard(raffle_id, user_id, page=0):
         navigation.append(InlineKeyboardButton("50–99 ➡️", callback_data=f"pickpage:{raffle_id}:1"))
     rows.append(navigation)
     rows.append([InlineKeyboardButton("📨 ENVIAR SELECCIÓN", callback_data=f"picksubmit:{raffle_id}")])
+    rows.append([InlineKeyboardButton("⬅️ VOLVER ATRÁS · OTRA LISTA", callback_data=f"pickback:{raffle_id}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -2547,6 +2556,31 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
     uid = q.from_user.id
+
+    if data.startswith("pickback:"):
+        try:
+            raffle_id = int(data.split(":", 1)[1])
+        except ValueError:
+            await q.answer("Lista inválida.", show_alert=True)
+            return
+        if q.message.chat.type != "private" or (not is_admin(uid) and not await has_channel_access(context.bot, uid)):
+            await q.answer("Abre el bot en privado y verifica tu acceso.", show_alert=True)
+            return
+        with db() as con:
+            con.execute("DELETE FROM number_reservations WHERE raffle_id=? AND user_id=?", (raffle_id, uid))
+            con.execute("DELETE FROM number_picker_messages WHERE raffle_id=? AND user_id=?", (raffle_id, uid))
+        context.user_data.pop("selected_raffle_id", None)
+        raffles = active_raffles(DEFAULT_GROUP_ID)
+        await q.answer("Volviendo a las listas")
+        if not raffles:
+            await q.message.edit_text("No hay listas activas en este momento.")
+        else:
+            await q.message.edit_text(
+                "🎟️ *LISTAS DISPONIBLES*\nSelecciona otra lista para consultar su información:",
+                parse_mode="Markdown", reply_markup=raffle_selector_keyboard(raffles)
+            )
+        await refresh_number_picker_messages(context, raffle_id)
+        return
 
     if data.startswith("pickpage:"):
         try:
@@ -3640,35 +3674,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not rows:
                 await q.message.reply_text("No hay listas activas registradas.", reply_markup=admin_back_keyboard())
             else:
-                await q.message.reply_text(f"📋 *LISTAS ACTIVAS · {len(rows)} LISTA(S)*", parse_mode="Markdown", reply_markup=admin_back_keyboard())
-                for item in rows:
-                    st = stats(item["id"])
-                    text = (
-                        f"🎟️ *{item['name']}* (#{item['id']})\n\n"
-                        f"🔢 *Número total:* {st['total']}\n"
-                        f"💵 *Valor por número:* {st['price']:.2f} {CURRENCY}\n"
-                        f"🏆 *Premio:* {item['prize'] or 'Por anunciar'}\n"
-                        f"💎 *Valor del premio:* {item.get('prize_value') or 'Por definir'}\n"
-                        f"🔴 *Números ocupados:* {st['occupied']}\n"
-                        f"🟡 *Números pendientes:* {st['pending']}\n"
-                        f"🟢 *Números libres:* {st['available']}\n"
-                        f"💰 *Total recaudado:* {st['revenue']:.2f} {CURRENCY}\n"
-                        f"📊 *Progreso:* {progress_bar(st['occupied'] + st['pending'], st['total'])}\n"
-                        f"📌 *Estado:* {item['status'].upper()}\n"
-                        f"👥 *Grupo:* {item['group_id']}"
-                    )
-                    await q.message.reply_text(text, parse_mode="Markdown", reply_markup=edit_raffle_keyboard(item["id"]))
-                    await asyncio.sleep(0.04)
+                await q.message.reply_text(
+                    f"📋 *LISTAS ACTIVAS · {len(rows)} LISTA(S)*\nSelecciona una lista para consultar sus datos:",
+                    parse_mode="Markdown",
+                    reply_markup=admin_list_grid_keyboard(rows, "adminactive", "📋")
+                )
         elif action == "stats":
             with db() as con:
                 rows = [dict(r) for r in con.execute("SELECT * FROM raffles ORDER BY id DESC").fetchall()]
             if not rows:
                 await q.message.reply_text("No hay listas registradas.", reply_markup=admin_back_keyboard())
             else:
-                keyboard = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(f"📊 {r['name']} (#{r['id']}) · {r['status']}", callback_data=f"adminstats:{r['id']}")] for r in rows]
-                    + [[InlineKeyboardButton("⬅️ Volver al panel", callback_data="admin:back")]]
-                )
+                keyboard = admin_list_grid_keyboard(rows, "adminstats", "📊")
                 await q.message.reply_text("Selecciona cualquier lista, abierta o cerrada, para consultar todas sus estadísticas:", reply_markup=keyboard)
         elif action == "winner":
             with db() as con:
@@ -3676,10 +3693,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not rows:
                 await q.message.reply_text("No hay listas disponibles para declarar ganador.", reply_markup=admin_back_keyboard())
             else:
-                keyboard = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(f"🏆 {r['name']} (#{r['id']})", callback_data=f"winnerchoose:{r['id']}")] for r in rows]
-                    + [[InlineKeyboardButton("Cancelar", callback_data="admin:back")]]
-                )
+                keyboard = admin_list_grid_keyboard(rows, "winnerchoose", "🏆")
                 await q.message.reply_text("¿En cuál lista vas a indicar el ganador?", reply_markup=keyboard)
         elif action == "reset":
             with db() as con:
@@ -3687,10 +3701,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not rows:
                 await q.message.reply_text("No hay listas registradas.", reply_markup=admin_back_keyboard())
             else:
-                keyboard = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(f"🔄 {r['name']} (#{r['id']}) · {r['status']}", callback_data=f"resetchoose:{r['id']}")] for r in rows]
-                    + [[InlineKeyboardButton("Cancelar", callback_data="admin:back")]]
-                )
+                keyboard = admin_list_grid_keyboard(rows, "resetchoose", "🔄")
                 await q.message.reply_text("Selecciona por ID la lista que deseas reiniciar. Esto libera sus números y conserva el historial.", reply_markup=keyboard)
         elif action == "delete":
             with db() as con:
@@ -3698,10 +3709,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not rows:
                 await q.message.reply_text("No hay listas registradas.", reply_markup=admin_back_keyboard())
             else:
-                keyboard = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(f"🗑️ {r['name']} (#{r['id']}) · {r['status']}", callback_data=f"deletechoose:{r['id']}")] for r in rows]
-                    + [[InlineKeyboardButton("Cancelar", callback_data="admin:back")]]
-                )
+                keyboard = admin_list_grid_keyboard(rows, "deletechoose", "🗑️")
                 await q.message.reply_text("Selecciona la lista que deseas borrar. Las listas completas están protegidas hasta confirmar la entrega del premio.", reply_markup=keyboard)
         elif action == "backup":
             await send_backup(update, context)
@@ -3714,16 +3722,36 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not rows:
                 await q.message.reply_text("Todavía no hay listas registradas.", reply_markup=admin_back_keyboard())
             else:
-                keyboard = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(f"📚 {r['name']} (#{r['id']}) · {r['status']}", callback_data=f"adminhistory:{r['id']}")] for r in rows]
-                    + [[InlineKeyboardButton("⬅️ Volver al panel", callback_data="admin:back")]]
-                )
+                keyboard = admin_list_grid_keyboard(rows, "adminhistory", "📚")
                 await q.message.reply_text("Selecciona la lista cuyo historial de jugadas deseas revisar:", reply_markup=keyboard)
         elif action == "back":
             context.user_data.pop("admin_flow", None)
             context.user_data.pop("awaiting_pix_key_input", None)
             context.user_data.pop("awaiting_user_play_control", None)
             await q.message.reply_text("⚙️ *PANEL DE ADMINISTRACIÓN*\nSelecciona una operación:", parse_mode="Markdown", reply_markup=admin_keyboard())
+        return
+
+    if data.startswith("adminactive:"):
+        if not is_admin(uid) or q.message.chat.type != "private":
+            await q.answer("No autorizado.", show_alert=True)
+            return
+        try:
+            raffle_id = int(data.split(":", 1)[1])
+        except ValueError:
+            await q.answer("Lista inválida.", show_alert=True)
+            return
+        detail = admin_active_list_info(raffle_id)
+        if not detail:
+            await q.answer("Esta lista ya no está activa.", show_alert=True)
+            return
+        await q.answer()
+        await q.message.edit_text(
+            detail, parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ Modificar lista", callback_data=f"editraffle:{raffle_id}")],
+                [InlineKeyboardButton("⬅️ Volver a listas", callback_data="admin:active")]
+            ])
+        )
         return
 
     if data.startswith("adminhistory:"):
