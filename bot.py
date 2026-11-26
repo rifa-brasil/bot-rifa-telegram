@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 47
+Bot de rifas Telegram - versión 46
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -1104,26 +1104,182 @@ async def lists_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def build_welcome_message(current_count: int, user_name: str, user_id: int) -> str:
-    """Mensaje oficial de bienvenida con el nombre enlazado al perfil de Telegram."""
+    """Construye el mensaje completo de bienvenida al nuevo miembro del canal."""
     safe_user_name = html.escape(user_name or "Participante")
     clickable_user_name = f'<a href="tg://user?id={int(user_id)}"><b>{safe_user_name}</b></a>'
-    return (
-        f"👋 ¡Bienvenido/a, {clickable_user_name}!\n\n"
-        "ℹ️ <b>INFORMACIÓN DEL CANAL Y DE LAS RIFAS</b>\n\n"
-        "Este canal informa sobre las listas de rifas, números confirmados, resultados y ganadores. Para elegir números y gestionar tus participaciones, utiliza los botones del chat privado del bot. La unión al canal es obligatoria para utilizar el bot.\n\n"
-        "🎟️ <b>¿Cómo funciona?</b>\n"
-        "• Cada lista tiene 100 números, del 01 al 100. Puedes elegir uno o varios números separados por una coma, por ejemplo (2, 4, 66, 4).\n"
-        "• El precio por número puede ser diferente en cada lista. Consulta cada lista para confirmar su precio, premio y disponibilidad.\n"
-        "• Un número no puede reservarse o confirmarse para dos personas. Sigue las instrucciones de pago y espera la confirmación del bot.\n"
-        "• Mientras los 100 números de una lista no estén ocupados y los pagos confirmados, no existe resultado ganador para esa lista. No se anuncia ni se determina un ganador antes de completar esas condiciones.\n"
-        "• Una vez completada la lista, el sorteo se basa en el resultado nocturno de <b>Florida Pick 3</b>. Si se completa antes de las 10:30pm, se utiliza el sorteo nocturno de ese día; si se completa después, se utiliza el de la noche siguiente.\n\n"
-        "🏆 <b>Premio</b>\n\n"
-        "El premio anunciado para cada lista corresponde entre el 60% – 85% de la recaudación total, según el porcentaje definido para cada lista. Ejemplo: 100 números a R$ 10 generan R$ 1.000 y un premio de R$ 600 a R$ 850, según la lista escogida por el usuario; cada lista tendrá información del valor de cada número y del premio.\n\n"
-        "🔎 <b>Verificación del resultado</b>\n\n"
-        "En el menú fijo encontrarás el botón para descargar la aplicación y consultar el resultado de Florida Pick 3.\n\n"
-        f"👥 <b>Usuarios Registrados:</b> muestra el número total de usuarios registrados en el bot. El mínimo de referencia es de 100 para que las listas sean desbloqueadas y puedan realizar sus jugadas; el administrador habilita o bloquea las jugadas manualmente.\n\n"
-        "📌 Cada botón del menú principal abre directamente la consulta correspondiente, sin submenús."
-    )
+    return f"""👋 ¡BIENVENIDO/A {clickable_user_name} A BRASCUBA SORTEO! 🇧🇷🇨🇺
+
+🎉 ¡Nos alegra tenerte aquí!
+
+Antes de comenzar, te invitamos a leer esta información. Aquí conocerás cómo funciona nuestro sistema, cómo seleccionar tus números, cuáles son las condiciones de cada lista y cómo se determinan los resultados y se entregan los premios.
+
+━━━━━━━━━━━━━━━━━━
+
+<b>ℹ️ 1. INFORMACIÓN DEL CANAL OFICIAL</b>
+
+Para utilizar BRASCUBA SORTEO, es obligatorio unirse primero a nuestro CANAL OFICIAL DE INFORMACIÓN.
+
+Este canal es el espacio donde podrás seguir toda la actividad de las listas y consultar las publicaciones relacionadas con los sorteos.
+
+📢 Allí se publicará automáticamente:
+
+✅ Cada jugada realizada y aprobada por el administrador.
+
+🔢 Los números confirmados de cada lista.
+
+🏆 Los resultados y números ganadores.
+
+💸 La confirmación de entrega de los premios, junto con el comprobante enviado por el ganador.
+
+🔎 Nuestro objetivo es ofrecer un espacio donde todos puedan mantenerse informados y consultar públicamente el desarrollo de las listas y sus resultados.
+
+📌 Para seleccionar números y gestionar tus participaciones, utiliza los botones del chat privado del bot.
+
+━━━━━━━━━━━━━━━━━━
+
+<b>🎟️ 2. ¿CÓMO FUNCIONAN LAS LISTAS?</b>
+
+Cada lista está compuesta por 100 números, del 00 al 99.
+
+🔢 Puedes seleccionar uno o varios números, escribiéndolos separados por comas.
+
+Ejemplo: "02, 04, 66, 78"
+
+<b>💰 VALOR DE PARTICIPACIÓN</b>
+
+El precio de cada número puede variar dependiendo de la lista que elijas.
+
+Antes de participar, podrás consultar claramente:
+
+- El valor de cada número.
+
+- El porcentaje destinado al premio.
+
+- El importe exacto del premio.
+
+- Los números disponibles.
+
+✅ Cada número solamente puede ser confirmado a nombre de un participante.
+
+💳 Sigue las instrucciones de pago indicadas por el bot y espera la aprobación del administrador para que tu participación quede confirmada.
+
+━━━━━━━━━━━━━━━━━━
+
+<b>⏳ 3. ¿CUÁNDO SE REALIZA EL SORTEO?</b>
+
+El sorteo de cada lista solamente se realiza cuando se cumplen estas dos condiciones:
+
+✔️ Los 100 números están ocupados.
+
+✔️ Todos los pagos correspondientes están confirmados y aprobados.
+
+Mientras estas condiciones no se cumplan, no habrá resultado ganador para esa lista.
+
+<b>🎯 MÉTODO DE SORTEO</b>
+
+El resultado se determina utilizando el resultado nocturno de FLORIDA PICK 3.
+
+🕥 Si la lista se completa antes de las 10:30 pm hora de Brasil, se utiliza el resultado nocturno de ese mismo día.
+
+🌙 Si se completa después de las 10:30 pm hora Brasil, se utiliza el resultado nocturno de la siguiente noche.
+
+━━━━━━━━━━━━━━━━━━
+
+<b>🏆 4. PREMIOS</b>
+
+Cada lista tiene un porcentaje de premio establecido, que puede corresponder entre el 65 % y el 85 % de la recaudación total, según la modalidad.
+
+📊 EJEMPLO:
+
+Si una lista tiene 100 números con un valor de R$ 10 cada uno:
+
+💰 Recaudación total: R$ 1.000.
+
+🏆 El premio dependerá del porcentaje establecido para esa lista.
+
+📌 IMPORTANTE: No necesitas hacer cálculos. Cada lista muestra previamente el porcentaje correspondiente y el importe exacto del premio que ofrece.
+
+💸 El premio se entrega mediante transferencia vía PIX.
+
+━━━━━━━━━━━━━━━━━━
+
+<b>🔎 5. VERIFICACIÓN DE RESULTADOS</b>
+
+La transparencia es fundamental.
+
+En el menú fijo del bot encontrarás un botón para descargar la aplicación y consultar directamente los resultados de FLORIDA PICK 3.
+
+Así podrás comprobar el resultado utilizado para determinar el número ganador.
+
+Además, los resultados de las listas se publicarán en el canal oficial para conocimiento de todos los participantes.
+
+━━━━━━━━━━━━━━━━━━
+
+<b>👑 6. ENTREGA Y CONFIRMACIÓN DEL PREMIO</b>
+
+Cuando se determina el ganador, este recibe una notificación privada del bot.
+
+Una vez realizada la transferencia del premio, el ganador tendrá la opción de pulsar el botón:
+
+✅ ¡YA RECIBÍ EL PREMIO!
+
+A continuación, podrá enviar la captura de la transferencia recibida.
+
+📢 Esta confirmación y su comprobante se publicarán también en el canal oficial, para que los demás participantes puedan consultar la entrega del premio.
+
+🔐 Los comprobantes deberán proteger los datos bancarios y personales que no sea necesario mostrar públicamente.
+
+━━━━━━━━━━━━━━━━━━
+
+<b>👥 7. USUARIOS REGISTRADOS</b>
+
+En esta sección podrás consultar la cantidad total de usuarios registrados en BRASCUBA SORTEO.
+
+📌 El mínimo de referencia es de 100 usuarios registrados para desbloquear las listas y permitir que puedan realizarse las jugadas.
+
+La habilitación o el bloqueo de las jugadas se realiza manualmente por el administrador.
+
+━━━━━━━━━━━━━━━━━━
+
+<b>🤖 8. MENÚ PRINCIPAL DEL BOT</b>
+
+El menú principal está diseñado para facilitar tu experiencia.
+
+Cada botón te lleva directamente a la consulta o función correspondiente, sin necesidad de navegar por submenús.
+
+📲 Explora las opciones disponibles y sigue las instrucciones para gestionar tus participaciones.
+
+━━━━━━━━━━━━━━━━━━
+
+¡GRACIAS POR FORMAR PARTE DE BRASCUBA SORTEO!
+
+Te invitamos a leer las condiciones de cada lista antes de participar y a consultar siempre la información publicada en nuestro canal oficial.
+
+🍀 ¡Mucha suerte a todos!
+
+<b>BRASCUBA SORTEO</b>
+
+Brasil y Cuba, unidos por una misma comunidad. 🇧🇷🤝🇨🇺"""
+
+
+async def send_welcome_message(bot, chat_id: int, message: str):
+    """Envía la bienvenida en partes para respetar el límite de Telegram."""
+    paragraphs = message.split("\n\n")
+    chunks = []
+    current = ""
+    for paragraph in paragraphs:
+        candidate = paragraph if not current else current + "\n\n" + paragraph
+        if len(candidate) > 3800 and current:
+            chunks.append(current)
+            current = paragraph
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+
+    for chunk in chunks:
+        await bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML")
+
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -1167,9 +1323,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Puedes revisar las listas y consultar tus datos. El mínimo de referencia es 100, pero el administrador puede habilitar manualmente las jugadas para pruebas. "
             "Recuerda que no hay resultado ganador hasta que los 100 números de una lista estén ocupados y los pagos confirmados."
         )
-    await update.effective_message.reply_text(
-        welcome, parse_mode="HTML"
-    )
+    await send_welcome_message(context.bot, update.effective_chat.id, welcome)
     await update.effective_message.reply_text(
         "👇 *PANEL PRINCIPAL*\nCada botón muestra directamente su información:",
         parse_mode="Markdown", reply_markup=user_keyboard()
@@ -3922,9 +4076,7 @@ async def welcome_channel_member(update: Update, context: ContextTypes.DEFAULT_T
             info_text = build_welcome_message(
                 after_count, member.username or member.full_name or member.first_name or "Participante", member.id
             )
-            await context.bot.send_message(
-                chat_id=CHANNEL_CHAT_ID, text=info_text, parse_mode="HTML"
-            )
+            await send_welcome_message(context.bot, CHANNEL_CHAT_ID, info_text)
         except Exception:
             log.exception("No se pudo publicar bienvenida al nuevo miembro del canal")
 
