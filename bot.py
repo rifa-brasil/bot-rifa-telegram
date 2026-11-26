@@ -1139,11 +1139,19 @@ def active_raffles(group_id):
 
 
 def raffle_selector_keyboard(raffles):
+    """Cuadrícula compacta: solo muestra los nombres de las listas disponibles."""
+    buttons = [
+        InlineKeyboardButton(str(r['name']), callback_data=f"userraffleinfo:{r['id']}")
+        for r in raffles
+    ]
+    rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+    return InlineKeyboardMarkup(rows)
+
+
+def user_raffle_info_keyboard(raffle_id):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            f"{r['name']} · {float(r['price']):.2f} {CURRENCY} · {r['total_numbers']} nums",
-            callback_data=f"selectraffle:{r['id']}"
-        )] for r in raffles
+        [InlineKeyboardButton("🎟️ Jugar", callback_data=f"selectraffle:{raffle_id}")],
+        [InlineKeyboardButton("⬅️ Volver a listas", callback_data="userlists:menu")]
     ])
 
 
@@ -1157,23 +1165,10 @@ async def lists_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not raffles:
         await update.effective_message.reply_text("No hay listas activas en este momento.", reply_markup=user_keyboard())
         return
-    await update.effective_message.reply_text("🎟️ *LISTAS DISPONIBLES*\nConsulta cada lista y pulsa el botón que aparece justo debajo de su información.", parse_mode="Markdown", reply_markup=user_keyboard())
-    for index, raffle in enumerate(raffles, 1):
-        st = stats(raffle["id"])
-        summary = (
-            f"🎟️ *{raffle['name']}* (Lista #{index})\n\n"
-            f"🔢 *Número total:* {st['total']}\n"
-            f"💵 *Valor por número:* {float(raffle['price']):.2f} {CURRENCY}\n"
-            f"🏆 *Premio:* {raffle['prize'] or 'Por anunciar'}\n"
-            f"💎 *Valor del premio:* {raffle.get('prize_value') or 'Por definir'}\n"
-            f"🔴 *Números ocupados:* {st['occupied']}\n"
-            f"🟡 *Números pendientes:* {st['pending']}\n"
-            f"🟢 *Números libres:* {st['available']}\n"
-            f"📊 *Progreso:* {progress_bar(st['occupied'] + st['pending'], st['total'])}\n"
-            f"📌 *Estado:* {raffle.get('status', 'active').upper()}"
-        )
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(f"🎟️ Jugar en {raffle['name']}", callback_data=f"selectraffle:{raffle['id']}")]])
-        await update.effective_message.reply_text(summary, parse_mode="Markdown", reply_markup=keyboard)
+    await update.effective_message.reply_text(
+        "🎟️ *LISTAS DISPONIBLES*\nSelecciona una lista para consultar su información:",
+        parse_mode="Markdown", reply_markup=raffle_selector_keyboard(raffles)
+    )
 
 
 def build_welcome_message(current_count: int, user_name: str, user_id: int) -> str:
@@ -1938,6 +1933,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = msg.text.strip()
 
+    # Si el administrador abandona el registro PIX y pulsa otra opción del panel,
+    # cancelar primero el modo de captura para que el texto no se interprete como llave.
+    if is_admin(update.effective_user.id) and context.user_data.get("awaiting_pix_key_input"):
+        if text in ADMIN_MENU_ACTIONS or text.startswith("👥 Usuarios Registrados ("):
+            context.user_data.pop("awaiting_pix_key_input", None)
+
     # Registro de llaves PIX desde el panel de administración.
     if is_admin(update.effective_user.id) and context.user_data.get("awaiting_pix_key_input"):
         separator = "/" if "/" in text else ("|" if "|" in text else None)
@@ -2591,6 +2592,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             con.execute("UPDATE number_reservations SET expires_at=? WHERE raffle_id=? AND user_id=?",
                         (session_expiry, raffle_id, uid))
             number_row = con.execute("SELECT status FROM numbers WHERE raffle_id=? AND number=?", (raffle_id, number)).fetchone()
+            # Algunas bases antiguas pueden no tener la fila 00 aunque el teclado
+            # la muestre como libre. Crear la fila faltante de forma atómica evita
+            # que al tocar 00 se informe falsamente que pertenece a otro usuario.
+            if number_row is None and 0 <= number < 100:
+                con.execute(
+                    "INSERT OR IGNORE INTO numbers(raffle_id,number,status,updated_at) VALUES(?,?,'available',?)",
+                    (raffle_id, number, iso_now())
+                )
+                number_row = con.execute(
+                    "SELECT status FROM numbers WHERE raffle_id=? AND number=?",
+                    (raffle_id, number)
+                ).fetchone()
             hold = con.execute("SELECT user_id FROM number_reservations WHERE raffle_id=? AND number=?", (raffle_id, number)).fetchone()
             if not number_row or number_row['status'] != 'available':
                 conflict = True
@@ -2961,6 +2974,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         parts = data.split(":")
         if parts[1] == "menu":
+            context.user_data.pop("awaiting_pix_key_input", None)
             keys = get_pix_keys()
             summary = "\n".join(f"{i}. {r['label']}: {r['key_text']}" for i, r in enumerate(keys, 1)) or "Todavía no has registrado llaves PIX."
             await q.answer()
@@ -2970,6 +2984,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         if parts[1] == "add":
+            context.user_data.pop("admin_flow", None)
             context.user_data["awaiting_pix_key_input"] = True
             await q.answer("Envía los datos de la llave.")
             await q.message.reply_text(
@@ -3099,6 +3114,51 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         await q.message.reply_text(f"✅ Llave PIX enviada al participante {user_id}.")
         audit("manual_key_sent", f"Solicitud {req_id}; llave {label}", uid)
+        return
+
+    if data == "userlists:menu":
+        if q.message.chat.type != "private" or (not is_admin(uid) and not await has_channel_access(context.bot, uid)):
+            await q.answer("Abre el bot en privado y verifica que estés unido al canal.", show_alert=True)
+            return
+        raffles = active_raffles(DEFAULT_GROUP_ID)
+        await q.answer()
+        if not raffles:
+            await q.message.edit_text("No hay listas activas en este momento.")
+            return
+        await q.message.edit_text(
+            "🎟️ *LISTAS DISPONIBLES*\nSelecciona una lista para consultar su información:",
+            parse_mode="Markdown", reply_markup=raffle_selector_keyboard(raffles)
+        )
+        return
+
+    if data.startswith("userraffleinfo:"):
+        if q.message.chat.type != "private" or (not is_admin(uid) and not await has_channel_access(context.bot, uid)):
+            await q.answer("Abre el bot en privado y verifica que estés unido al canal.", show_alert=True)
+            return
+        try:
+            raffle_id = int(data.split(":", 1)[1])
+        except ValueError:
+            await q.answer("Lista inválida.", show_alert=True)
+            return
+        raffle = get_raffle(raffle_id)
+        if not raffle or raffle["status"] != "active" or raffle not in active_raffles(DEFAULT_GROUP_ID):
+            await q.answer("Esta lista ya no está disponible.", show_alert=True)
+            return
+        st = stats(raffle_id)
+        summary = (
+            f"🎟️ *{raffle['name']}* (#{raffle_id})\n\n"
+            f"🔢 *Número total:* {st['total']}\n"
+            f"💵 *Valor por número:* {float(raffle['price']):.2f} {CURRENCY}\n"
+            f"🏆 *Premio:* {raffle['prize'] or 'Por anunciar'}\n"
+            f"💎 *Valor del premio:* {raffle.get('prize_value') or 'Por definir'}\n"
+            f"🔴 *Números ocupados:* {st['occupied']}\n"
+            f"🟡 *Números pendientes:* {st['pending']}\n"
+            f"🟢 *Números libres:* {st['available']}\n"
+            f"📊 *Progreso:* {progress_bar(st['occupied'] + st['pending'], st['total'])}\n"
+            f"📌 *Estado:* {raffle.get('status', 'active').upper()}"
+        )
+        await q.answer()
+        await q.message.edit_text(summary, parse_mode="Markdown", reply_markup=user_raffle_info_keyboard(raffle_id))
         return
 
     if data.startswith("selectraffle:"):
@@ -3661,6 +3721,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await q.message.reply_text("Selecciona la lista cuyo historial de jugadas deseas revisar:", reply_markup=keyboard)
         elif action == "back":
             context.user_data.pop("admin_flow", None)
+            context.user_data.pop("awaiting_pix_key_input", None)
+            context.user_data.pop("awaiting_user_play_control", None)
             await q.message.reply_text("⚙️ *PANEL DE ADMINISTRACIÓN*\nSelecciona una operación:", parse_mode="Markdown", reply_markup=admin_keyboard())
         return
 
