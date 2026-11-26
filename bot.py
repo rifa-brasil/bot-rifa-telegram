@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 46
+Bot de rifas Telegram - versión 49
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -149,6 +149,26 @@ def init_db():
             active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS number_picker_messages (
+            raffle_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            chat_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            page INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (raffle_id, user_id),
+            FOREIGN KEY (raffle_id) REFERENCES raffles(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS number_reservations (
+            raffle_id INTEGER NOT NULL,
+            number INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            name TEXT DEFAULT '',
+            username TEXT DEFAULT '',
+            expires_at TEXT NOT NULL,
+            PRIMARY KEY (raffle_id, number),
+            FOREIGN KEY (raffle_id) REFERENCES raffles(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_number_reservations_user ON number_reservations(user_id, raffle_id);
         CREATE TABLE IF NOT EXISTS raffle_progress_messages (
             raffle_id INTEGER NOT NULL, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
             PRIMARY KEY (raffle_id,user_id)
@@ -309,6 +329,33 @@ def init_db():
                 )
             except Exception:
                 log.exception("No se pudo migrar el importe de la solicitud antigua %s", legacy["id"])
+        # Versión 49: migra la numeración histórica 1..100 a 00..99 una sola vez.
+        # Conserva la relación entre cada número, participante, solicitud, compra y ganador.
+        number_format = con.execute(
+            "SELECT setting_value FROM bot_settings WHERE setting_key='number_format_00_99_v49'"
+        ).fetchone()
+        if not number_format:
+            raffle_ids = [int(x[0]) for x in con.execute("SELECT id FROM raffles").fetchall()]
+            for raffle_id in raffle_ids:
+                nums = con.execute(
+                    "SELECT COUNT(*),MIN(number),MAX(number),SUM(CASE WHEN number=0 THEN 1 ELSE 0 END) "
+                    "FROM numbers WHERE raffle_id=?", (raffle_id,)
+                ).fetchone()
+                if nums and nums[0] and nums[3] == 0 and nums[1] >= 1 and nums[2] <= 100:
+                    con.execute("UPDATE numbers SET number=number+1000 WHERE raffle_id=?", (raffle_id,))
+                    con.execute("UPDATE numbers SET number=number-1001 WHERE raffle_id=?", (raffle_id,))
+            for table in ("requests", "purchases"):
+                for old in con.execute(f"SELECT rowid AS _rid,numbers_json FROM {table}").fetchall():
+                    try:
+                        old_numbers = json.loads(old["numbers_json"] or "[]")
+                        new_numbers = [int(n)-1 if 1 <= int(n) <= 100 else int(n) for n in old_numbers]
+                        con.execute(f"UPDATE {table} SET numbers_json=? WHERE rowid=?", (json.dumps(new_numbers), old["_rid"]))
+                    except Exception:
+                        log.exception("No se pudo convertir la numeración histórica de %s", table)
+            con.execute("UPDATE winners SET number=number-1 WHERE number BETWEEN 1 AND 100")
+            con.execute(
+                "INSERT INTO bot_settings(setting_key,setting_value) VALUES('number_format_00_99_v49','1')"
+            )
         # Cierra automáticamente listas antiguas que ya tenían todos sus números aprobados.
         con.execute(
             """UPDATE raffles SET status='sold_out',closed_at=COALESCE(closed_at,?)
@@ -1420,7 +1467,7 @@ async def new_raffle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rid = cur.lastrowid
             con.executemany(
                 "INSERT INTO numbers(raffle_id,number,status,updated_at) VALUES(?,?,?,?)",
-                [(rid, n, "available", iso_now()) for n in range(1, 101)]
+                [(rid, n, "available", iso_now()) for n in range(0, 100)]
             )
     except (ValueError, InvalidOperation, sqlite3.IntegrityError):
         await update.effective_message.reply_text("Datos inválidos o nombre repetido. Comprueba las opciones y vuelve a intentarlo.")
@@ -1478,7 +1525,7 @@ def verify_winner_ownership(con, winner):
 
 async def publish_winner(update, context, raffle_id, number):
     raffle = get_raffle(raffle_id)
-    if not raffle or not 1 <= number <= raffle["total_numbers"]:
+    if not raffle or not 0 <= number < raffle["total_numbers"]:
         await update.effective_message.reply_text("Lista o número inválido.")
         return
     prize_amount = raffle_prize_amount(raffle)
@@ -2035,7 +2082,19 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not is_admin(update.effective_user.id):
         if text in {"🎟️ Ver listas activas", "listas", "lista", "hola", "buenas", "rifa", "inicio"}:
-            await lists_cmd(update, context)
+            selected_id = context.user_data.get("selected_raffle_id")
+            selected = get_raffle(selected_id) if selected_id else None
+            if text.lower() == "lista" and selected and selected["group_id"] == DEFAULT_GROUP_ID and selected["status"] == "active":
+                picker_message = await msg.reply_text(
+                    number_picker_text(selected_id, update.effective_user.id),
+                    parse_mode="HTML", reply_markup=number_picker_keyboard(selected_id, update.effective_user.id)
+                )
+                with db() as con:
+                    con.execute("INSERT INTO number_picker_messages(raffle_id,user_id,chat_id,message_id,page) VALUES(?,?,?,?,0) "
+                                "ON CONFLICT(raffle_id,user_id) DO UPDATE SET chat_id=excluded.chat_id,message_id=excluded.message_id,page=0",
+                                (selected_id, update.effective_user.id, msg.chat_id, picker_message.message_id))
+            else:
+                await lists_cmd(update, context)
             return
         direct_actions = {
             "🎟️ Mis jugadas": "plays",
@@ -2103,7 +2162,14 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         selected_id = context.user_data.get("selected_raffle_id")
         selected = get_raffle(selected_id) if selected_id else None
         if selected and selected["group_id"] == DEFAULT_GROUP_ID and selected["status"] == "active":
-            await msg.reply_text(list_text(selected_id), parse_mode="Markdown")
+            picker_message = await msg.reply_text(
+                number_picker_text(selected_id, update.effective_user.id),
+                parse_mode="HTML", reply_markup=number_picker_keyboard(selected_id, update.effective_user.id)
+            )
+            with db() as con:
+                con.execute("INSERT INTO number_picker_messages(raffle_id,user_id,chat_id,message_id,page) VALUES(?,?,?,?,0) "
+                            "ON CONFLICT(raffle_id,user_id) DO UPDATE SET chat_id=excluded.chat_id,message_id=excluded.message_id,page=0",
+                            (selected_id, update.effective_user.id, msg.chat_id, picker_message.message_id))
         else:
             await lists_cmd(update, context)
         return
@@ -2112,6 +2178,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not re.fullmatch(r"\d+(?:\s*,\s*\d+)*", text):
         return
+    await msg.reply_text(
+        "🎟️ Para elegir tus números, abre la lista y toca cada casilla del 00 al 99. "
+        "Cuando termines, pulsa «📨 ENVIAR SELECCIÓN».",
+        reply_markup=user_keyboard()
+    )
+    return
 
     if not is_admin(update.effective_user.id):
         with db() as con:
@@ -2153,8 +2225,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     numbers = list(dict.fromkeys(int(x.strip()) for x in text.split(",")))
-    if any(n < 1 or n > raffle["total_numbers"] for n in numbers):
-        await msg.reply_text(f"Los números deben estar entre 1 y {raffle['total_numbers']}.")
+    if any(n < 0 or n >= raffle["total_numbers"] for n in numbers):
+        await msg.reply_text("Los números deben estar entre 00 y 99.")
         return
     uid = update.effective_user.id
     uname = update.effective_user.username or ""
@@ -2247,10 +2319,317 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("No se pudo publicar la solicitud. Los números fueron liberados; inténtalo de nuevo.")
 
 
+def clean_expired_number_reservations(con):
+    """Libera selecciones temporales vencidas sin tocar solicitudes ya enviadas."""
+    con.execute("DELETE FROM number_reservations WHERE expires_at<=?", (iso_now(),))
+
+
+def number_picker_text(raffle_id, user_id, page=0):
+    with db() as con:
+        clean_expired_number_reservations(con)
+        raffle = con.execute("SELECT * FROM raffles WHERE id=?", (raffle_id,)).fetchone()
+        selected = [int(r[0]) for r in con.execute(
+            "SELECT number FROM number_reservations WHERE raffle_id=? AND user_id=? ORDER BY number",
+            (raffle_id, user_id)
+        ).fetchall()]
+        reservations_count = con.execute(
+            "SELECT COUNT(*) FROM number_reservations WHERE raffle_id=?", (raffle_id,)
+        ).fetchone()[0]
+    if not raffle:
+        return "<b>Esta lista ya no existe.</b>"
+    chosen = ", ".join(f"{n:02d}" for n in selected) if selected else "Ninguno todavía"
+    return (
+        f"<b>🎟️ {html.escape(raffle['name'])} · LISTA #{raffle_id}</b>\n"
+        f"💵 Valor por número: <b>{float(raffle['price']):.2f} {CURRENCY}</b>\n"
+        f"🏆 Premio: <b>{html.escape(str(raffle['prize'] or 'Por anunciar'))}</b>\n"
+        f"💎 Valor del premio: <b>{html.escape(str(raffle['prize_value'] or 'Por definir'))}</b>\n\n"
+        "👇 <b>Toca los números disponibles para seleccionarlos.</b>\n"
+        "🟢 Libre · 🟡 Selección temporal · 🔴 Ocupado\n\n"
+        f"<b>Tus números:</b> {chosen}\n"
+        f"<b>Seleccionados:</b> {len(selected)} · <b>En reserva temporal:</b> {reservations_count}\n"
+        f"<b>Cuadrícula:</b> {'00–49' if int(page) == 0 else '50–99'}\n\n"
+        "Al pulsar ENVIAR, se registrará tu solicitud y recibirás las instrucciones de pago."
+    )
+
+
+def number_picker_keyboard(raffle_id, user_id, page=0):
+    with db() as con:
+        clean_expired_number_reservations(con)
+        number_rows = con.execute(
+            "SELECT number,status,user_id,name FROM numbers WHERE raffle_id=? ORDER BY number",
+            (raffle_id,)
+        ).fetchall()
+        temporary = {int(r['number']): dict(r) for r in con.execute(
+            "SELECT number,user_id,name FROM number_reservations WHERE raffle_id=?",
+            (raffle_id,)
+        ).fetchall()}
+    by_number = {int(r['number']): dict(r) for r in number_rows}
+    rows = []
+    page = 0 if int(page) == 0 else 1
+    first_number = page * 50
+    # Cinco columnas dan botones más anchos y reducen los toques accidentales.
+    for start in range(first_number, first_number + 50, 5):
+        line = []
+        for number in range(start, start + 5):
+            current = by_number.get(number, {})
+            status = current.get('status', 'available')
+            hold = temporary.get(number)
+            label = f"{number:02d}"
+            if status == 'available' and hold and int(hold['user_id']) == int(user_id):
+                line.append(InlineKeyboardButton(f"☑️{label}", callback_data=f"picknum:{raffle_id}:{number}"))
+            elif status == 'available' and hold:
+                line.append(InlineKeyboardButton(f"⏳{label}", callback_data=f"pickbusy:{raffle_id}:{number}"))
+            elif status == 'available':
+                line.append(InlineKeyboardButton(label, callback_data=f"picknum:{raffle_id}:{number}"))
+            else:
+                owner_id = current.get('user_id')
+                if owner_id:
+                    icon = "🟡" if status == 'pending' else "🔴"
+                    if int(owner_id) == int(user_id):
+                        line.append(InlineKeyboardButton(f"{icon}{label}", callback_data=f"pickbusy:{raffle_id}:{number}"))
+                    else:
+                        line.append(InlineKeyboardButton(f"{icon}{label}", url=f"tg://user?id={int(owner_id)}"))
+                else:
+                    line.append(InlineKeyboardButton(f"🔒{label}", callback_data=f"pickbusy:{raffle_id}:{number}"))
+        rows.append(line)
+    navigation = []
+    if page == 1:
+        navigation.append(InlineKeyboardButton("⬅️ 00–49", callback_data=f"pickpage:{raffle_id}:0"))
+    if page == 0:
+        navigation.append(InlineKeyboardButton("50–99 ➡️", callback_data=f"pickpage:{raffle_id}:1"))
+    rows.append(navigation)
+    rows.append([InlineKeyboardButton("📨 ENVIAR SELECCIÓN", callback_data=f"picksubmit:{raffle_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def refresh_number_picker_messages(context, raffle_id):
+    """Actualiza la cuadrícula abierta de los participantes para reflejar reservas al instante."""
+    with db() as con:
+        targets = con.execute(
+            "SELECT user_id,chat_id,message_id,page FROM number_picker_messages WHERE raffle_id=?",
+            (raffle_id,)
+        ).fetchall()
+    for target in targets:
+        user_id = int(target['user_id'])
+        page = int(target['page'] or 0)
+        try:
+            await context.bot.edit_message_text(
+                chat_id=target['chat_id'], message_id=target['message_id'],
+                text=number_picker_text(raffle_id, user_id, page), parse_mode='HTML',
+                reply_markup=number_picker_keyboard(raffle_id, user_id, page)
+            )
+        except Exception:
+            log.debug("No se pudo refrescar la cuadrícula del usuario %s", user_id, exc_info=True)
+
+
+async def send_number_request_from_picker(q, context, raffle_id, numbers):
+    uid = q.from_user.id
+    if not q.message or q.message.chat.type != "private":
+        await q.answer("La selección solo se puede enviar desde el chat privado del bot.", show_alert=True)
+        return
+    if not is_admin(uid):
+        with db() as con:
+            user_block = con.execute("SELECT playing_blocked FROM bot_users WHERE user_id=?", (uid,)).fetchone()
+        if user_block and int(user_block['playing_blocked'] or 0):
+            await q.answer("Tus jugadas están bloqueadas por el administrador.", show_alert=True)
+            return
+        if not is_playing_enabled():
+            await q.answer("Las jugadas están bloqueadas por el administrador.", show_alert=True)
+            return
+    raffle = get_raffle(raffle_id)
+    if not raffle or raffle['status'] != 'active':
+        await q.answer("Esta lista ya no está activa.", show_alert=True)
+        return
+    uname = q.from_user.username or ''
+    name = q.from_user.full_name or q.from_user.first_name or 'Participante'
+    req_id = uuid.uuid4().hex[:12]
+    created = now_utc()
+    deadline = created + timedelta(minutes=RESERVATION_MINUTES)
+    async with db_lock:
+        with db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            clean_expired_number_reservations(con)
+            held = con.execute(
+                "SELECT number FROM number_reservations WHERE raffle_id=? AND user_id=? ORDER BY number",
+                (raffle_id, uid)
+            ).fetchall()
+            numbers = [int(x['number']) for x in held]
+            if not numbers:
+                await q.answer("Primero selecciona al menos un número.", show_alert=True)
+                return
+            placeholders = ','.join('?' for _ in numbers)
+            actual = con.execute(
+                f"SELECT number,status FROM numbers WHERE raffle_id=? AND number IN ({placeholders})",
+                [raffle_id, *numbers]
+            ).fetchall()
+            if len(actual) != len(numbers) or any(x['status'] != 'available' for x in actual):
+                await q.answer("Uno de tus números dejó de estar disponible. Actualiza la lista.", show_alert=True)
+                return
+            con.executemany(
+                "UPDATE numbers SET status='pending',user_id=?,name=?,username=?,updated_at=? "
+                "WHERE raffle_id=? AND number=? AND status='available'",
+                [(uid, name, uname, iso_now(), raffle_id, n) for n in numbers]
+            )
+            con.execute(
+                "INSERT INTO requests(id,raffle_id,user_id,name,username,numbers_json,origin_chat,status,created_at,expires_at,price_per_number,total_amount) "
+                "VALUES(?,?,?,?,?,?,?,'awaiting_button',?,?,?,?)",
+                (req_id, raffle_id, uid, name, uname, json.dumps(numbers), q.message.chat_id,
+                 created.isoformat(), deadline.isoformat(), float(raffle['price']), len(numbers)*float(raffle['price']))
+            )
+            con.execute("DELETE FROM number_reservations WHERE raffle_id=? AND user_id=?", (raffle_id, uid))
+            con.execute("DELETE FROM number_picker_messages WHERE raffle_id=? AND user_id=?", (raffle_id, uid))
+    amount = len(numbers) * float(raffle['price'])
+    number_text = ', '.join(f"{n:02d}" for n in numbers)
+    request_text = (
+        f"⏳ *SOLICITUD EN PROCESO*\n\n"
+        f"🎟️ Lista: *{raffle['name']}*\n"
+        f"👤 Participante: [{name}](tg://user?id={uid})\n"
+        f"🔢 Números: *{number_text}*\n"
+        f"💵 Precio por número: *{float(raffle['price']):.2f} {CURRENCY}*\n"
+        f"💰 Total a pagar: *{amount:.2f} {CURRENCY}*\n"
+        f"🏆 Premio: *{raffle['prize'] or 'Por anunciar'}*\n"
+        f"💎 Valor del premio: *{raffle.get('prize_value') or 'Por definir'}*\n\n"
+        f"Realiza el pago dentro de los próximos {RESERVATION_MINUTES} minutos. "
+        "Pulsa «Solicitar Llave PIX» para recibir la llave de pago por este chat privado."
+    )
+    try:
+        key_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔑 Solicitar Llave PIX", callback_data=f"keyrequest:{req_id}")]])
+        sent = await context.bot.send_message(chat_id=q.message.chat_id, text=request_text,
+                                              parse_mode='Markdown', reply_markup=key_keyboard)
+        with db() as con:
+            con.execute("UPDATE requests SET group_message_id=? WHERE id=?", (sent.message_id, req_id))
+        await q.answer("Selección enviada. Revisa tu solicitud.")
+        try:
+            await q.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await refresh_number_picker_messages(context, raffle_id)
+        await refresh_raffle_progress_messages(context, raffle_id)
+        await refresh_user_progress_panels(context, raffle_id)
+    except Exception:
+        log.exception("No se pudo enviar la solicitud creada desde la cuadrícula")
+        with db() as con:
+            for n in numbers:
+                con.execute("UPDATE numbers SET status='available',user_id=NULL,name='',username='',updated_at=? WHERE raffle_id=? AND number=? AND status='pending' AND user_id=?",
+                            (iso_now(), raffle_id, n, uid))
+            con.execute("UPDATE requests SET status='cancelled',processed_at=? WHERE id=?", (iso_now(), req_id))
+        await q.answer("No se pudo enviar la solicitud. Los números fueron liberados.", show_alert=True)
+
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
     uid = q.from_user.id
+
+    if data.startswith("pickpage:"):
+        try:
+            _, raffle_text, page_text = data.split(":", 2)
+            raffle_id, page = int(raffle_text), int(page_text)
+            if page not in (0, 1):
+                raise ValueError()
+        except ValueError:
+            await q.answer("Página inválida.", show_alert=True)
+            return
+        await q.answer()
+        try:
+            await q.message.edit_text(number_picker_text(raffle_id, uid, page), parse_mode='HTML',
+                                      reply_markup=number_picker_keyboard(raffle_id, uid, page))
+            with db() as con:
+                con.execute("INSERT INTO number_picker_messages(raffle_id,user_id,chat_id,message_id,page) VALUES(?,?,?,?,?) "
+                            "ON CONFLICT(raffle_id,user_id) DO UPDATE SET chat_id=excluded.chat_id,message_id=excluded.message_id,page=excluded.page",
+                            (raffle_id, uid, q.message.chat_id, q.message.message_id, page))
+        except Exception:
+            log.debug("No se pudo cambiar la página de la cuadrícula", exc_info=True)
+        return
+
+    if data.startswith("picknum:"):
+        try:
+            _, raffle_text, number_text = data.split(":", 2)
+            raffle_id, number = int(raffle_text), int(number_text)
+        except ValueError:
+            await q.answer("Selección inválida.", show_alert=True)
+            return
+        if q.message.chat.type != "private" or (not is_admin(uid) and not await has_channel_access(context.bot, uid)):
+            await q.answer("Abre el bot en privado y verifica que estés unido al canal.", show_alert=True)
+            return
+        raffle = get_raffle(raffle_id)
+        if not raffle or raffle['status'] != 'active':
+            await q.answer("Esta lista ya no está activa.", show_alert=True)
+            return
+        with db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            clean_expired_number_reservations(con)
+            # Cada toque renueva por cinco minutos todas las casillas de esta sesión,
+            # para que seleccionar varios números no haga vencer los primeros.
+            session_expiry = (now_utc() + timedelta(minutes=RESERVATION_MINUTES)).isoformat()
+            con.execute("UPDATE number_reservations SET expires_at=? WHERE raffle_id=? AND user_id=?",
+                        (session_expiry, raffle_id, uid))
+            number_row = con.execute("SELECT status FROM numbers WHERE raffle_id=? AND number=?", (raffle_id, number)).fetchone()
+            hold = con.execute("SELECT user_id FROM number_reservations WHERE raffle_id=? AND number=?", (raffle_id, number)).fetchone()
+            if not number_row or number_row['status'] != 'available':
+                conflict = True
+            elif hold and int(hold['user_id']) != uid:
+                conflict = True
+            elif hold and int(hold['user_id']) == uid:
+                con.execute("DELETE FROM number_reservations WHERE raffle_id=? AND number=? AND user_id=?", (raffle_id, number, uid))
+                conflict = False
+            else:
+                expires = (now_utc() + timedelta(minutes=RESERVATION_MINUTES)).isoformat()
+                con.execute("INSERT INTO number_reservations(raffle_id,number,user_id,name,username,expires_at) VALUES(?,?,?,?,?,?)",
+                            (raffle_id, number, uid, q.from_user.full_name or q.from_user.first_name or 'Participante', q.from_user.username or '', expires))
+                conflict = False
+        if conflict:
+            await q.answer("Ese número ya está seleccionado o está ocupado por otro participante.", show_alert=True)
+        else:
+            await q.answer("Número actualizado.")
+        try:
+            page = 0 if number < 50 else 1
+            await q.message.edit_text(number_picker_text(raffle_id, uid, page), parse_mode='HTML',
+                                      reply_markup=number_picker_keyboard(raffle_id, uid, page))
+            with db() as con:
+                con.execute("INSERT INTO number_picker_messages(raffle_id,user_id,chat_id,message_id,page) VALUES(?,?,?,?,?) "
+                            "ON CONFLICT(raffle_id,user_id) DO UPDATE SET chat_id=excluded.chat_id,message_id=excluded.message_id,page=excluded.page",
+                            (raffle_id, uid, q.message.chat_id, q.message.message_id, page))
+        except Exception:
+            pass
+        await refresh_number_picker_messages(context, raffle_id)
+        return
+
+    if data.startswith("pickbusy:"):
+        try:
+            _, raffle_text, number_text = data.split(":", 2)
+            raffle_id, number = int(raffle_text), int(number_text)
+        except ValueError:
+            await q.answer("Número inválido.", show_alert=True)
+            return
+        with db() as con:
+            clean_expired_number_reservations(con)
+            hold = con.execute("SELECT user_id,name FROM number_reservations WHERE raffle_id=? AND number=?", (raffle_id, number)).fetchone()
+            owner = con.execute("SELECT user_id,name,status FROM numbers WHERE raffle_id=? AND number=?", (raffle_id, number)).fetchone()
+        if hold and int(hold['user_id']) != uid:
+            await q.answer("Este número está seleccionado temporalmente por otro participante.", show_alert=True)
+        elif owner and owner['user_id'] and int(owner['user_id']) != uid:
+            await q.answer("Este número ya está ocupado. Toca el número para abrir el perfil del participante.", show_alert=True)
+        else:
+            await q.answer("Este número ya no está disponible.", show_alert=True)
+        try:
+            await q.message.edit_reply_markup(reply_markup=number_picker_keyboard(raffle_id, uid))
+        except Exception:
+            pass
+        await refresh_number_picker_messages(context, raffle_id)
+        return
+
+    if data.startswith("picksubmit:"):
+        try:
+            raffle_id = int(data.split(":", 1)[1])
+        except ValueError:
+            await q.answer("Lista inválida.", show_alert=True)
+            return
+        if not is_admin(uid) and not await has_channel_access(context.bot, uid):
+            await q.answer("Primero debes unirte al canal.", show_alert=True)
+            return
+        await send_number_request_from_picker(q, context, raffle_id, [])
+        return
 
     if data.startswith("createlistname:"):
         if not is_admin(uid) or q.message.chat.type != "private":
@@ -2326,7 +2705,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rid = cur.lastrowid
                 con.executemany(
                     "INSERT INTO numbers(raffle_id,number,status,updated_at) VALUES(?,?,?,?)",
-                    [(rid, n, "available", iso_now()) for n in range(1, 101)]
+                    [(rid, n, "available", iso_now()) for n in range(0, 100)]
                 )
             audit("new_raffle", f"Rifa #{rid}: {flow['name']}", uid)
             context.user_data.pop("admin_flow", None)
@@ -2625,12 +3004,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["selected_raffle_id"] = raffle_id
         await q.answer("Lista seleccionada")
         sent = await q.message.reply_text(
-            list_text(raffle_id) + "\n\n✍️ Escribe los números que deseas (por ejemplo: 05, 18, 72).",
-            parse_mode="Markdown", reply_markup=user_keyboard()
+            number_picker_text(raffle_id, uid),
+            parse_mode="HTML", reply_markup=number_picker_keyboard(raffle_id, uid)
         )
         with db() as con:
-            con.execute("INSERT INTO raffle_progress_messages(raffle_id,user_id,chat_id,message_id) VALUES(?,?,?,?) "
-                        "ON CONFLICT(raffle_id,user_id) DO UPDATE SET chat_id=excluded.chat_id,message_id=excluded.message_id",
+            con.execute("INSERT INTO number_picker_messages(raffle_id,user_id,chat_id,message_id,page) VALUES(?,?,?,?,0) "
+                        "ON CONFLICT(raffle_id,user_id) DO UPDATE SET chat_id=excluded.chat_id,message_id=excluded.message_id,page=0",
                         (raffle_id, uid, q.message.chat_id, sent.message_id))
         return
 
@@ -3344,6 +3723,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             con.execute("UPDATE numbers SET status='available',user_id=NULL,name='',username='',updated_at=? WHERE raffle_id=?",
                         (iso_now(), raffle_id))
+            con.execute("DELETE FROM number_reservations WHERE raffle_id=?", (raffle_id,))
             con.execute(
                 "UPDATE requests SET status='cancelled',processed_at=? WHERE raffle_id=? "
                 "AND status IN ('pending','awaiting_button','awaiting_user_click','payment_reported')",
@@ -4117,7 +4497,7 @@ def list_text(raffle_id):
         f"💵 Valor por número: *{float(r['price']):.2f} {CURRENCY}*",
         f"🏆 Premio: *{r['prize'] or 'Premio entregado mediante transferencia PIX'}*",
         f"💎 Valor del premio: *{r['prize_value'] or 'Por definir'}*",
-        f"🔢 Cantidad de números: *{r['total_numbers']}*",
+        f"🔢 Números disponibles: *00 al 99*",
         ""
     ]
     for row in rows:
