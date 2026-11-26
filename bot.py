@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 49
+Bot de rifas Telegram - versión 50
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -1061,11 +1061,37 @@ def raffle_name_keyboard():
 
 
 def raffle_percent_keyboard():
-    values = (60, 65, 70, 75, 80, 85)
+    values = (65, 70, 75, 80, 85)
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"{v}%", callback_data=f"createpercent:{v}") for v in values[i:i+3]]
         for i in range(0, len(values), 3)
     ])
+
+
+def edit_raffle_keyboard(raffle_id):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Modificar lista", callback_data=f"editraffle:{raffle_id}")]])
+
+
+def edit_raffle_field_keyboard(raffle_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💵 Modificar valor", callback_data=f"editfield:{raffle_id}:price")],
+        [InlineKeyboardButton("🏆 Modificar porcentaje", callback_data=f"editfield:{raffle_id}:percent")],
+        [InlineKeyboardButton("⬅️ Volver", callback_data="admin:active")]
+    ])
+
+
+def edit_raffle_price_keyboard(raffle_id):
+    values = [10, 15, 20, 25, 30, 35]
+    rows = [[InlineKeyboardButton(f"R$ {v}", callback_data=f"editprice:{raffle_id}:{v}") for v in values[i:i+3]] for i in range(0, len(values), 3)]
+    rows.append([InlineKeyboardButton("⬅️ Volver", callback_data=f"editraffle:{raffle_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def edit_raffle_percent_keyboard(raffle_id):
+    values = [65, 70, 75, 80, 85]
+    rows = [[InlineKeyboardButton(f"{v}%", callback_data=f"editpercent:{raffle_id}:{v}") for v in values[i:i+3]] for i in range(0, len(values), 3)]
+    rows.append([InlineKeyboardButton("⬅️ Volver", callback_data=f"editraffle:{raffle_id}")])
+    return InlineKeyboardMarkup(rows)
 
 
 def admin_flow_prompt(step):
@@ -1438,14 +1464,14 @@ async def new_raffle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(
             "Uso: /nueva Nombre de lista|15|70\n"
             "Precios permitidos: 10, 15, 20, 25, 30 o 35. "
-            "Porcentajes permitidos: 60, 65, 70, 75, 80 u 85."
+            "Porcentajes permitidos: 65, 70, 75, 80 u 85."
         )
         return
     try:
         name, price_text, percent_text = parts
         price = Decimal(price_text.replace(",", "."))
         percent = Decimal(percent_text.replace("%", "").replace(",", "."))
-        if not name or len(name) > 100 or price not in {Decimal(x) for x in (10,15,20,25,30,35)} or percent not in {Decimal(60),Decimal(65),Decimal(70),Decimal(75),Decimal(80),Decimal(85)}:
+        if not name or len(name) > 100 or price not in {Decimal(x) for x in (10,15,20,25,30,35)} or percent not in {Decimal(65),Decimal(70),Decimal(75),Decimal(80),Decimal(85)}:
             raise ValueError()
         amount = (price * Decimal("100") * percent / Decimal("100")).quantize(Decimal("0.01"))
         amount_fmt = f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -1834,7 +1860,7 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     f"📌 *Estado:* {item['status'].upper()}\n"
                     f"👥 *Grupo:* {item['group_id']}"
                 )
-                await msg.reply_text(result, parse_mode="Markdown", reply_markup=admin_keyboard())
+                await msg.reply_text(result, parse_mode="Markdown", reply_markup=edit_raffle_keyboard(item["id"]))
                 await asyncio.sleep(0.04)
     elif action == "stats":
         with db() as con:
@@ -2662,6 +2688,90 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(admin_flow_prompt("price"), parse_mode="Markdown", reply_markup=raffle_price_keyboard())
         return
 
+    if data.startswith("editraffle:") or data.startswith("editfield:") or data.startswith("editprice:") or data.startswith("editpercent:"):
+        if not is_admin(uid) or q.message.chat.type != "private":
+            await q.answer("Solo el administrador puede modificar listas.", show_alert=True)
+            return
+        parts = data.split(":")
+        try:
+            raffle_id = int(parts[1])
+        except (IndexError, ValueError):
+            await q.answer("Lista no válida.", show_alert=True)
+            return
+        with db() as con:
+            raffle_row = con.execute("SELECT * FROM raffles WHERE id=?", (raffle_id,)).fetchone()
+            raffle = dict(raffle_row) if raffle_row else None
+        if not raffle or raffle["status"] != "active":
+            await q.answer("Solo puedes modificar listas activas.", show_alert=True)
+            return
+
+        if data.startswith("editraffle:"):
+            await q.answer()
+            await q.message.reply_text(
+                f"✏️ *MODIFICAR {raffle['name']}* (#{raffle_id})\n\n"
+                f"Valor actual por número: *R$ {float(raffle['price']):.2f}*\n"
+                f"Porcentaje actual: *{raffle['prize_value'] or 'No definido'}*\n\n"
+                "¿Qué deseas modificar?",
+                parse_mode="Markdown", reply_markup=edit_raffle_field_keyboard(raffle_id)
+            )
+            return
+
+        if data.startswith("editfield:"):
+            field = parts[2] if len(parts) > 2 else ""
+            await q.answer()
+            if field == "price":
+                await q.message.reply_text("Selecciona el nuevo *valor por número*:", parse_mode="Markdown", reply_markup=edit_raffle_price_keyboard(raffle_id))
+            elif field == "percent":
+                await q.message.reply_text("Selecciona el nuevo *porcentaje del premio*:", parse_mode="Markdown", reply_markup=edit_raffle_percent_keyboard(raffle_id))
+            else:
+                await q.answer("Opción no válida.", show_alert=True)
+            return
+
+        if data.startswith("editprice:"):
+            try:
+                price = Decimal(parts[2])
+                if price not in {Decimal(v) for v in (10, 15, 20, 25, 30, 35)}:
+                    raise ValueError()
+            except (IndexError, ValueError, InvalidOperation):
+                await q.answer("Valor no válido.", show_alert=True)
+                return
+            match = re.search(r"(65|70|75|80|85)%", str(raffle.get("prize_value") or ""))
+            percent = int(match.group(1)) if match else 65
+            amount = (price * Decimal(100) * Decimal(percent) / Decimal(100)).quantize(Decimal("0.01"))
+            amount_fmt = f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            prize_value = f"R$ {amount_fmt} ({percent}% del total)"
+            with db() as con:
+                con.execute("UPDATE raffles SET price=?, prize_value=? WHERE id=? AND status='active'", (float(price), prize_value, raffle_id))
+            audit("raffle_price_updated", f"Lista #{raffle_id}: nuevo valor R$ {price:.2f}", uid)
+            await q.answer("Valor actualizado")
+            await q.message.reply_text(
+                f"✅ *LISTA MODIFICADA*\n\nLista: *{raffle['name']}*\nNuevo valor por número: *R$ {price:.2f}*\nPorcentaje conservado: *{percent}%*\nNuevo premio calculado: *{prize_value}*",
+                parse_mode="Markdown", reply_markup=admin_keyboard()
+            )
+            return
+
+        if data.startswith("editpercent:"):
+            try:
+                percent = int(parts[2])
+                if percent not in (65, 70, 75, 80, 85):
+                    raise ValueError()
+            except (IndexError, ValueError):
+                await q.answer("Porcentaje no válido.", show_alert=True)
+                return
+            price = Decimal(str(raffle["price"]))
+            amount = (price * Decimal(100) * Decimal(percent) / Decimal(100)).quantize(Decimal("0.01"))
+            amount_fmt = f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            prize_value = f"R$ {amount_fmt} ({percent}% del total)"
+            with db() as con:
+                con.execute("UPDATE raffles SET prize_value=? WHERE id=? AND status='active'", (prize_value, raffle_id))
+            audit("raffle_percent_updated", f"Lista #{raffle_id}: nuevo porcentaje {percent}%", uid)
+            await q.answer("Porcentaje actualizado")
+            await q.message.reply_text(
+                f"✅ *LISTA MODIFICADA*\n\nLista: *{raffle['name']}*\nValor por número conservado: *R$ {float(price):.2f}*\nNuevo porcentaje: *{percent}%*\nNuevo premio calculado: *{prize_value}*",
+                parse_mode="Markdown", reply_markup=admin_keyboard()
+            )
+            return
+
     if data.startswith("createprice:") or data.startswith("createpercent:"):
         if not is_admin(uid) or q.message.chat.type != "private":
             await q.answer("Solo el administrador puede crear listas.", show_alert=True)
@@ -2682,7 +2792,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await q.message.reply_text(admin_flow_prompt("percent"), parse_mode="Markdown", reply_markup=raffle_percent_keyboard())
                 return
             percent = Decimal(data.split(":", 1)[1])
-            if percent not in {Decimal(60), Decimal(65), Decimal(70), Decimal(75), Decimal(80), Decimal(85)} or flow.get("step") != "percent":
+            if percent not in {Decimal(65), Decimal(70), Decimal(75), Decimal(80), Decimal(85)} or flow.get("step") != "percent":
                 raise ValueError()
             group = DEFAULT_GROUP_ID
             if group == 0:
@@ -3487,7 +3597,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"📌 *Estado:* {item['status'].upper()}\n"
                         f"👥 *Grupo:* {item['group_id']}"
                     )
-                    await q.message.reply_text(text, parse_mode="Markdown", reply_markup=admin_back_keyboard())
+                    await q.message.reply_text(text, parse_mode="Markdown", reply_markup=edit_raffle_keyboard(item["id"]))
                     await asyncio.sleep(0.04)
         elif action == "stats":
             with db() as con:
