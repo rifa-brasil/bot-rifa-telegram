@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 54
+Bot de rifas Telegram - versión 55
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -361,7 +361,8 @@ def init_db():
             """UPDATE raffles SET status='sold_out',closed_at=COALESCE(closed_at,?)
                WHERE status='active' AND id IN (
                    SELECT n.raffle_id FROM numbers n
-                   WHERE n.status='occupied'
+                   WHERE n.status='occupied' AND n.number>=0
+                     AND n.number<(SELECT r2.total_numbers FROM raffles r2 WHERE r2.id=n.raffle_id)
                    GROUP BY n.raffle_id
                    HAVING COUNT(*) >= (SELECT r.total_numbers FROM raffles r WHERE r.id=n.raffle_id)
                )""",
@@ -437,9 +438,13 @@ def stats(raffle_id):
         r = con.execute("SELECT * FROM raffles WHERE id=?", (raffle_id,)).fetchone()
         if not r:
             return None
+        # Cuenta únicamente los números válidos de la lista (00–99 en listas de 100).
+        # Esto evita que registros heredados fuera del rango, como el número 100,
+        # inflen el total de disponibles y produzcan cifras como 101 libres.
         counts = {x["status"]: x["n"] for x in con.execute(
-            "SELECT status,COUNT(*) n FROM numbers WHERE raffle_id=? GROUP BY status",
-            (raffle_id,)
+            "SELECT status,COUNT(*) n FROM numbers "
+            "WHERE raffle_id=? AND number>=0 AND number<? GROUP BY status",
+            (raffle_id, int(r["total_numbers"]))
         )}
         occupied = counts.get("occupied", 0)
         pending = counts.get("pending", 0)
@@ -910,14 +915,32 @@ def build_user_stats(uid, action):
     with db() as con:
         if action == "plays":
             rows = con.execute(
-                "SELECT p.*,r.name AS raffle_name FROM purchases p JOIN raffles r ON r.id=p.raffle_id WHERE p.user_id=? ORDER BY p.id DESC LIMIT 30",
+                "SELECT p.*,r.name AS raffle_name FROM purchases p JOIN raffles r ON r.id=p.raffle_id WHERE p.user_id=? ORDER BY p.id DESC",
                 (uid,)
             ).fetchall()
+            winner_rows = con.execute(
+                "SELECT raffle_id,number,prize_received,prize_status FROM winners WHERE user_id=? ORDER BY id DESC",
+                (uid,)
+            ).fetchall()
+            winning_numbers = {}
+            for winner_row in winner_rows:
+                winning_numbers.setdefault(int(winner_row["raffle_id"]), set()).add(int(winner_row["number"]))
             pending = con.execute(
                 "SELECT rq.*,r.name AS raffle_name FROM requests rq JOIN raffles r ON r.id=rq.raffle_id WHERE rq.user_id=? AND rq.status IN ('awaiting_button','key_requested','awaiting_user_click','awaiting_payment_amount','payment_reported','awaiting_payment_receipt','claim_pending','expired') ORDER BY rq.created_at DESC LIMIT 20",
                 (uid,)
             ).fetchall()
-            blocks = [f"🎟️ *Lista:* {r['raffle_name']}\n🔢 *Números jugados:* {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))}\n💰 *Importe:* {float(r['amount']):.2f} {CURRENCY}\n📌 *Estado:* {str(r['status']).upper()}" for r in rows]
+            blocks = []
+            for r in rows:
+                played_numbers = [int(n) for n in json.loads(r["numbers_json"] or "[]")]
+                won_numbers = sorted(set(played_numbers) & winning_numbers.get(int(r["raffle_id"]), set()))
+                status_line = f"📌 *Estado:* {str(r['status']).upper()}"
+                if won_numbers:
+                    status_line += "\n🏆 *¡FUISTE GANADOR EN ESTA JUGADA!*\n🎯 *Número ganador:* " + ", ".join(f"{n:02d}" for n in won_numbers)
+                blocks.append(
+                    f"🎟️ *Lista:* {r['raffle_name']}\n"
+                    f"🔢 *Números jugados:* {', '.join(f'{n:02d}' for n in played_numbers)}\n"
+                    f"💰 *Importe:* {float(r['amount']):.2f} {CURRENCY}\n{status_line}"
+                )
             blocks += [f"⏳ *Lista:* {r['raffle_name']}\n🔢 *Números solicitados:* {', '.join(f'{n:02d}' for n in json.loads(r['numbers_json']))}\n💰 *Importe:* {float(r['total_amount'] or 0):.2f} {CURRENCY}\n📌 *Estado:* {str(r['status']).upper()}" for r in pending]
             title = "🎟️ *MIS JUGADAS*"
             empty = "Todavía no tienes jugadas registradas."
@@ -2420,7 +2443,8 @@ def number_picker_keyboard(raffle_id, user_id, page=0):
     with db() as con:
         clean_expired_number_reservations(con)
         number_rows = con.execute(
-            "SELECT number,status,user_id,name FROM numbers WHERE raffle_id=? ORDER BY number",
+            "SELECT number,status,user_id,name FROM numbers "
+            "WHERE raffle_id=? AND number>=0 AND number<100 ORDER BY number",
             (raffle_id,)
         ).fetchall()
         temporary = {int(r['number']): dict(r) for r in con.execute(
@@ -3271,7 +3295,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         with db() as con:
             available = [int(x[0]) for x in con.execute(
-                "SELECT number FROM numbers WHERE raffle_id=? AND status='available' ORDER BY number",
+                "SELECT number FROM numbers WHERE raffle_id=? AND number>=0 AND number<100 "
+                "AND status='available' ORDER BY number",
                 (raffle_id,)
             ).fetchall()]
         await q.answer()
@@ -3464,7 +3489,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             con.execute("UPDATE winners SET prize_status='payout_receipt_pending' WHERE id=?", (winner_id,))
         await q.answer("Envía la captura de la transferencia.")
-        await q.message.reply_text(f"📸 Adjunta ahora la captura de la transferencia realizada al ganador {winner['name']} (lista #{winner['raffle_id']}).")
+        raffle = get_raffle(winner["raffle_id"])
+        raffle_label = raffle["name"] if raffle else f"ID {winner['raffle_id']}"
+        await q.message.reply_text(
+            f"📸 Adjunta ahora la captura de la transferencia realizada al ganador {winner['name']} "
+            f"(lista: {raffle_label})."
+        )
         return
 
     if data.startswith("prizereceived:"):
@@ -3558,8 +3588,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if action == "ok":
                     raffle_row = con.execute("SELECT total_numbers,status FROM raffles WHERE id=?", (req["raffle_id"],)).fetchone()
                     occupied_count = con.execute(
-                        "SELECT COUNT(*) FROM numbers WHERE raffle_id=? AND status='occupied'",
-                        (req["raffle_id"],)
+                        "SELECT COUNT(*) FROM numbers WHERE raffle_id=? AND number>=0 "
+                        "AND number<(SELECT total_numbers FROM raffles WHERE id=?) AND status='occupied'",
+                        (req["raffle_id"], req["raffle_id"])
                     ).fetchone()[0]
                     if raffle_row and raffle_row["status"] == "active" and occupied_count >= raffle_row["total_numbers"]:
                         con.execute("UPDATE raffles SET status='sold_out',closed_at=? WHERE id=?",
@@ -4402,7 +4433,12 @@ async def prize_receipt_photo_handler(update: Update, context: ContextTypes.DEFA
             con.execute("UPDATE winners SET prize_received=1,receipt_pending=0,prize_status='completed',received_at=? WHERE id=?", (iso_now(), winner["id"]))
         await message.reply_text("✅ Captura recibida y publicada en el canal. Tu premio quedó marcado como recibido.")
         try:
-            await context.bot.send_message(ADMIN_ID, f"🏁 Premio de {winner['name']} (lista #{winner['raffle_id']}, número {int(winner['number']):02d}) completado. La captura de recepción fue publicada en el canal.")
+            raffle_label = raffle["name"] if raffle else f"ID {winner['raffle_id']}"
+            await context.bot.send_message(
+                ADMIN_ID,
+                f"🏁 Premio de {winner['name']} (lista: {raffle_label}, número {int(winner['number']):02d}) completado. "
+                "La captura de recepción fue publicada en el canal."
+            )
         except Exception:
             log.exception("No se pudo enviar al administrador la confirmación final del premio")
         audit("prize_receipt_uploaded", f"Ganador #{winner['id']} comprobante enviado", user.id)
@@ -4732,11 +4768,12 @@ async def refresh_raffle_progress_messages(context, raffle_id):
 def list_text(raffle_id):
     with db() as con:
         r = con.execute("SELECT * FROM raffles WHERE id=?", (raffle_id,)).fetchone()
+        if not r:
+            return "No existe esa rifa."
         rows = con.execute(
-            "SELECT * FROM numbers WHERE raffle_id=? ORDER BY number", (raffle_id,)
+            "SELECT * FROM numbers WHERE raffle_id=? AND number>=0 AND number<? ORDER BY number",
+            (raffle_id, int(r["total_numbers"]))
         ).fetchall()
-    if not r:
-        return "No existe esa rifa."
     s = stats(raffle_id)
     lines = [
         f"🎟️ *{r['name']}* (Lista #{raffle_id})",
