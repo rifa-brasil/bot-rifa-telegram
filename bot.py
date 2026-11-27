@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 53
+Bot de rifas Telegram - versión 54
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -964,10 +964,10 @@ def admin_keyboard():
             [KeyboardButton(f"👥 Usuarios Registrados ({count})")],
             [KeyboardButton("➕ Crear lista"), KeyboardButton("📋 Listas activas")],
             [KeyboardButton("📊 Estadísticas"), KeyboardButton("🏆 Indicar Número Ganador")],
-            [KeyboardButton("🔄 Resetear lista"), KeyboardButton("🗑️ Borrar lista")],
             [KeyboardButton("👥 Historial"), KeyboardButton("🔑 Gestionar llaves PIX")],
             [KeyboardButton("🔒 Bloquear jugadas"), KeyboardButton("🔓 Desbloquear jugadas")],
             [KeyboardButton("💾 Crear respaldo"), KeyboardButton("♻️ Restaurar respaldo")],
+            [KeyboardButton("🔄 Resetear lista"), KeyboardButton("🗑️ Borrar lista")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -2144,6 +2144,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     number_picker_text(selected_id, update.effective_user.id),
                     parse_mode="HTML", reply_markup=number_picker_keyboard(selected_id, update.effective_user.id)
                 )
+                await msg.reply_text(
+                    "👇 Cuando termines de marcar tus números, elige una acción:",
+                    reply_markup=number_picker_actions_keyboard(selected_id)
+                )
                 with db() as con:
                     con.execute("INSERT INTO number_picker_messages(raffle_id,user_id,chat_id,message_id,page) VALUES(?,?,?,?,0) "
                                 "ON CONFLICT(raffle_id,user_id) DO UPDATE SET chat_id=excluded.chat_id,message_id=excluded.message_id,page=0",
@@ -2220,6 +2224,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             picker_message = await msg.reply_text(
                 number_picker_text(selected_id, update.effective_user.id),
                 parse_mode="HTML", reply_markup=number_picker_keyboard(selected_id, update.effective_user.id)
+            )
+            await msg.reply_text(
+                "👇 Cuando termines de marcar tus números, elige una acción:",
+                reply_markup=number_picker_actions_keyboard(selected_id)
             )
             with db() as con:
                 con.execute("INSERT INTO number_picker_messages(raffle_id,user_id,chat_id,message_id,page) VALUES(?,?,?,?,0) "
@@ -2446,9 +2454,15 @@ def number_picker_keyboard(raffle_id, user_id, page=0):
                 else:
                     line.append(InlineKeyboardButton(f"🔒{label}", callback_data=f"pickbusy:{raffle_id}:{number}"))
         rows.append(line)
-    rows.append([InlineKeyboardButton("📨 ENVIAR SELECCIÓN", callback_data=f"picksubmit:{raffle_id}")])
-    rows.append([InlineKeyboardButton("⬅️ VOLVER ATRÁS · INFORMACIÓN DE ESTA LISTA", callback_data=f"pickback:{raffle_id}")])
     return InlineKeyboardMarkup(rows)
+
+
+def number_picker_actions_keyboard(raffle_id):
+    """Acciones en un segundo mensaje: la cuadrícula ya contiene 100 botones."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📨 ENVIAR SELECCIÓN", callback_data=f"picksubmit:{raffle_id}")],
+        [InlineKeyboardButton("⬅️ VOLVER ATRÁS · INFORMACIÓN DE ESTA LISTA", callback_data=f"pickback:{raffle_id}")],
+    ])
 
 
 async def refresh_number_picker_messages(context, raffle_id):
@@ -2548,6 +2562,17 @@ async def send_number_request_from_picker(q, context, raffle_id, numbers):
         with db() as con:
             con.execute("UPDATE requests SET group_message_id=? WHERE id=?", (sent.message_id, req_id))
         await q.answer("Selección enviada. Revisa tu solicitud.")
+        with db() as con:
+            picker_row = con.execute(
+                "SELECT chat_id,message_id FROM number_picker_messages WHERE raffle_id=? AND user_id=?",
+                (raffle_id, uid)
+            ).fetchone()
+            con.execute("DELETE FROM number_picker_messages WHERE raffle_id=? AND user_id=?", (raffle_id, uid))
+        if picker_row:
+            try:
+                await context.bot.delete_message(chat_id=picker_row["chat_id"], message_id=picker_row["message_id"])
+            except Exception:
+                log.debug("No se pudo retirar la cuadrícula tras enviar la selección", exc_info=True)
         try:
             await q.message.edit_reply_markup(reply_markup=None)
         except Exception:
@@ -2580,8 +2605,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Abre el bot en privado y verifica tu acceso.", show_alert=True)
             return
         with db() as con:
+            picker_row = con.execute(
+                "SELECT chat_id,message_id FROM number_picker_messages WHERE raffle_id=? AND user_id=?",
+                (raffle_id, uid)
+            ).fetchone()
             con.execute("DELETE FROM number_reservations WHERE raffle_id=? AND user_id=?", (raffle_id, uid))
             con.execute("DELETE FROM number_picker_messages WHERE raffle_id=? AND user_id=?", (raffle_id, uid))
+        if picker_row:
+            try:
+                await context.bot.delete_message(chat_id=picker_row["chat_id"], message_id=picker_row["message_id"])
+            except Exception:
+                log.debug("No se pudo retirar la cuadrícula al volver a la información", exc_info=True)
         context.user_data.pop("selected_raffle_id", None)
         info_text = user_raffle_info_text(raffle_id)
         if not info_text:
@@ -3218,6 +3252,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sent = await q.message.reply_text(
             number_picker_text(raffle_id, uid),
             parse_mode="HTML", reply_markup=number_picker_keyboard(raffle_id, uid)
+        )
+        await q.message.reply_text(
+            "👇 Cuando termines de marcar tus números, elige una acción:",
+            reply_markup=number_picker_actions_keyboard(raffle_id)
         )
         with db() as con:
             con.execute("INSERT INTO number_picker_messages(raffle_id,user_id,chat_id,message_id,page) VALUES(?,?,?,?,0) "
