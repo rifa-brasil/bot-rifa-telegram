@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 52
+Bot de rifas Telegram - versión 53
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -1044,6 +1044,7 @@ def admin_back_keyboard():
 
 def admin_list_grid_keyboard(raffles, prefix, icon="🎟️", include_back=True, extra_rows=None):
     """Muestra listas administrativas en cuadrícula de dos columnas."""
+    raffles = sorted(raffles, key=lambda r: int(r['id']))
     buttons = [
         InlineKeyboardButton(f"{icon} {r['name']} · #{r['id']}", callback_data=f"{prefix}:{r['id']}")
         for r in raffles
@@ -1181,6 +1182,25 @@ def raffle_selector_keyboard(raffles):
     ]
     rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
     return InlineKeyboardMarkup(rows)
+
+
+def user_raffle_info_text(raffle_id):
+    raffle = get_raffle(raffle_id)
+    if not raffle or raffle["status"] != "active":
+        return None
+    st = stats(raffle_id)
+    return (
+        f"🎟️ *{raffle['name']}* (#{raffle_id})\n\n"
+        f"🔢 *Número total:* {st['total']}\n"
+        f"💵 *Valor por número:* {float(raffle['price']):.2f} {CURRENCY}\n"
+        f"🏆 *Premio:* {raffle['prize'] or 'Por anunciar'}\n"
+        f"💎 *Valor del premio:* {raffle.get('prize_value') or 'Por definir'}\n"
+        f"🔴 *Números ocupados:* {st['occupied']}\n"
+        f"🟡 *Números pendientes:* {st['pending']}\n"
+        f"🟢 *Números libres:* {st['available']}\n"
+        f"📊 *Progreso:* {progress_bar(st['occupied'] + st['pending'], st['total'])}\n"
+        f"📌 *Estado:* {raffle.get('status', 'active').upper()}"
+    )
 
 
 def user_raffle_info_keyboard(raffle_id):
@@ -1880,7 +1900,7 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     elif action == "stats":
         with db() as con:
             rows = [dict(r) for r in con.execute(
-                "SELECT * FROM raffles ORDER BY id DESC"
+                "SELECT * FROM raffles ORDER BY id ASC"
             ).fetchall()]
         if not rows:
             await msg.reply_text("No hay listas registradas.", reply_markup=admin_keyboard())
@@ -1899,7 +1919,7 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await msg.reply_text("¿En cuál lista vas a indicar el ganador?", reply_markup=keyboard)
     elif action == "reset":
         with db() as con:
-            rows = con.execute("SELECT id,name,status FROM raffles ORDER BY id DESC LIMIT 50").fetchall()
+            rows = con.execute("SELECT id,name,status FROM raffles ORDER BY id ASC LIMIT 50").fetchall()
         if not rows:
             await msg.reply_text("No hay listas registradas.", reply_markup=admin_keyboard())
         else:
@@ -1910,7 +1930,7 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             )
     elif action == "delete":
         with db() as con:
-            rows = con.execute("SELECT id,name,status FROM raffles ORDER BY id DESC LIMIT 50").fetchall()
+            rows = con.execute("SELECT id,name,status FROM raffles ORDER BY id ASC LIMIT 50").fetchall()
         if not rows:
             await msg.reply_text("No hay listas registradas.", reply_markup=admin_keyboard())
         else:
@@ -1926,7 +1946,7 @@ async def admin_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         )
     elif action == "history":
         with db() as con:
-            rows = con.execute("SELECT id,name,status FROM raffles ORDER BY id DESC").fetchall()
+            rows = con.execute("SELECT id,name,status FROM raffles ORDER BY id ASC").fetchall()
         if not rows:
             await msg.reply_text("Todavía no hay listas registradas.", reply_markup=admin_keyboard())
         else:
@@ -2382,12 +2402,13 @@ def number_picker_text(raffle_id, user_id, page=0):
         "🟢 Libre · 🟡 Selección temporal · 🔴 Ocupado\n\n"
         f"<b>Tus números:</b> {chosen}\n"
         f"<b>Seleccionados:</b> {len(selected)} · <b>En reserva temporal:</b> {reservations_count}\n"
-        f"<b>Cuadrícula:</b> {'00–49' if int(page) == 0 else '50–99'}\n\n"
+        "<b>Cuadrícula:</b> 00–99 (desliza para ver todos los números)\n\n"
         "Al pulsar ENVIAR, se registrará tu solicitud y recibirás las instrucciones de pago."
     )
 
 
 def number_picker_keyboard(raffle_id, user_id, page=0):
+    """Muestra los 100 números en una sola cuadrícula vertical desplazable."""
     with db() as con:
         clean_expired_number_reservations(con)
         number_rows = con.execute(
@@ -2400,10 +2421,8 @@ def number_picker_keyboard(raffle_id, user_id, page=0):
         ).fetchall()}
     by_number = {int(r['number']): dict(r) for r in number_rows}
     rows = []
-    page = 0 if int(page) == 0 else 1
-    first_number = page * 50
-    # Cinco columnas dan botones más anchos y reducen los toques accidentales.
-    for start in range(first_number, first_number + 50, 5):
+    # Cinco columnas por veinte filas; Telegram permite deslizar el mensaje para recorrerlas.
+    for start in range(0, 100, 5):
         line = []
         for number in range(start, start + 5):
             current = by_number.get(number, {})
@@ -2427,14 +2446,8 @@ def number_picker_keyboard(raffle_id, user_id, page=0):
                 else:
                     line.append(InlineKeyboardButton(f"🔒{label}", callback_data=f"pickbusy:{raffle_id}:{number}"))
         rows.append(line)
-    navigation = []
-    if page == 1:
-        navigation.append(InlineKeyboardButton("⬅️ 00–49", callback_data=f"pickpage:{raffle_id}:0"))
-    if page == 0:
-        navigation.append(InlineKeyboardButton("50–99 ➡️", callback_data=f"pickpage:{raffle_id}:1"))
-    rows.append(navigation)
     rows.append([InlineKeyboardButton("📨 ENVIAR SELECCIÓN", callback_data=f"picksubmit:{raffle_id}")])
-    rows.append([InlineKeyboardButton("⬅️ VOLVER ATRÁS · OTRA LISTA", callback_data=f"pickback:{raffle_id}")])
+    rows.append([InlineKeyboardButton("⬅️ VOLVER ATRÁS · INFORMACIÓN DE ESTA LISTA", callback_data=f"pickback:{raffle_id}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -2570,14 +2583,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             con.execute("DELETE FROM number_reservations WHERE raffle_id=? AND user_id=?", (raffle_id, uid))
             con.execute("DELETE FROM number_picker_messages WHERE raffle_id=? AND user_id=?", (raffle_id, uid))
         context.user_data.pop("selected_raffle_id", None)
-        raffles = active_raffles(DEFAULT_GROUP_ID)
-        await q.answer("Volviendo a las listas")
-        if not raffles:
-            await q.message.edit_text("No hay listas activas en este momento.")
+        info_text = user_raffle_info_text(raffle_id)
+        if not info_text:
+            await q.answer("Esta lista ya no está disponible.", show_alert=True)
+            raffles = active_raffles(DEFAULT_GROUP_ID)
+            if raffles:
+                await q.message.edit_text(
+                    "🎟️ *LISTAS DISPONIBLES*\nSelecciona una lista para consultar su información:",
+                    parse_mode="Markdown", reply_markup=raffle_selector_keyboard(raffles)
+                )
+            else:
+                await q.message.edit_text("No hay listas activas en este momento.")
         else:
+            await q.answer("Volviendo a la información de la lista")
             await q.message.edit_text(
-                "🎟️ *LISTAS DISPONIBLES*\nSelecciona otra lista para consultar su información:",
-                parse_mode="Markdown", reply_markup=raffle_selector_keyboard(raffles)
+                info_text, parse_mode="Markdown", reply_markup=user_raffle_info_keyboard(raffle_id)
             )
         await refresh_number_picker_messages(context, raffle_id)
         return
@@ -3178,19 +3198,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not raffle or raffle["status"] != "active" or raffle not in active_raffles(DEFAULT_GROUP_ID):
             await q.answer("Esta lista ya no está disponible.", show_alert=True)
             return
-        st = stats(raffle_id)
-        summary = (
-            f"🎟️ *{raffle['name']}* (#{raffle_id})\n\n"
-            f"🔢 *Número total:* {st['total']}\n"
-            f"💵 *Valor por número:* {float(raffle['price']):.2f} {CURRENCY}\n"
-            f"🏆 *Premio:* {raffle['prize'] or 'Por anunciar'}\n"
-            f"💎 *Valor del premio:* {raffle.get('prize_value') or 'Por definir'}\n"
-            f"🔴 *Números ocupados:* {st['occupied']}\n"
-            f"🟡 *Números pendientes:* {st['pending']}\n"
-            f"🟢 *Números libres:* {st['available']}\n"
-            f"📊 *Progreso:* {progress_bar(st['occupied'] + st['pending'], st['total'])}\n"
-            f"📌 *Estado:* {raffle.get('status', 'active').upper()}"
-        )
+        summary = user_raffle_info_text(raffle_id)
         await q.answer()
         await q.message.edit_text(summary, parse_mode="Markdown", reply_markup=user_raffle_info_keyboard(raffle_id))
         return
@@ -3681,7 +3689,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
         elif action == "stats":
             with db() as con:
-                rows = [dict(r) for r in con.execute("SELECT * FROM raffles ORDER BY id DESC").fetchall()]
+                rows = [dict(r) for r in con.execute("SELECT * FROM raffles ORDER BY id ASC").fetchall()]
             if not rows:
                 await q.message.reply_text("No hay listas registradas.", reply_markup=admin_back_keyboard())
             else:
@@ -3697,7 +3705,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await q.message.reply_text("¿En cuál lista vas a indicar el ganador?", reply_markup=keyboard)
         elif action == "reset":
             with db() as con:
-                rows = con.execute("SELECT id,name,status FROM raffles ORDER BY id DESC LIMIT 50").fetchall()
+                rows = con.execute("SELECT id,name,status FROM raffles ORDER BY id ASC LIMIT 50").fetchall()
             if not rows:
                 await q.message.reply_text("No hay listas registradas.", reply_markup=admin_back_keyboard())
             else:
@@ -3705,7 +3713,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await q.message.reply_text("Selecciona por ID la lista que deseas reiniciar. Esto libera sus números y conserva el historial.", reply_markup=keyboard)
         elif action == "delete":
             with db() as con:
-                rows = con.execute("SELECT id,name,status FROM raffles ORDER BY id DESC LIMIT 50").fetchall()
+                rows = con.execute("SELECT id,name,status FROM raffles ORDER BY id ASC LIMIT 50").fetchall()
             if not rows:
                 await q.message.reply_text("No hay listas registradas.", reply_markup=admin_back_keyboard())
             else:
@@ -3718,7 +3726,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text("Envía aquí el archivo de respaldo *.json*. El sistema lo validará y te pedirá confirmación.", parse_mode="Markdown", reply_markup=admin_back_keyboard())
         elif action == "history":
             with db() as con:
-                rows = con.execute("SELECT id,name,status FROM raffles ORDER BY id DESC").fetchall()
+                rows = con.execute("SELECT id,name,status FROM raffles ORDER BY id ASC").fetchall()
             if not rows:
                 await q.message.reply_text("Todavía no hay listas registradas.", reply_markup=admin_back_keyboard())
             else:
