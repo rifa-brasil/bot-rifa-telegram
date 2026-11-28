@@ -1,5 +1,5 @@
 """
-Bot de rifas Telegram - versión 55
+Bot de rifas Telegram - versión 56
 - Varias rifas, SQLite, reservas con caducidad, historial, pagos manuales,
   panel de administración, ganador y confirmación de premio.
 - Mensajes privados opcionales desde una cuenta dedicada mediante Telethon.
@@ -1069,7 +1069,7 @@ def admin_list_grid_keyboard(raffles, prefix, icon="🎟️", include_back=True,
     """Muestra listas administrativas en cuadrícula de dos columnas."""
     raffles = sorted(raffles, key=lambda r: int(r['id']))
     buttons = [
-        InlineKeyboardButton(f"{icon} {r['name']} · #{r['id']}", callback_data=f"{prefix}:{r['id']}")
+        InlineKeyboardButton(f"{icon} {r['name']}", callback_data=f"{prefix}:{r['id']}")
         for r in raffles
     ]
     rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
@@ -1086,7 +1086,7 @@ def admin_active_list_info(raffle_id):
         return None
     st = stats(raffle_id)
     return (
-        f"🎟️ *{raffle['name']}* (#{raffle_id})\n\n"
+        f"🎟️ *{raffle['name']}*\n\n"
         f"🔢 *Número total:* {st['total']}\n"
         f"💵 *Valor por número:* {st['price']:.2f} {CURRENCY}\n"
         f"🏆 *Premio:* {raffle['prize'] or 'Por anunciar'}\n"
@@ -1213,7 +1213,7 @@ def user_raffle_info_text(raffle_id):
         return None
     st = stats(raffle_id)
     return (
-        f"🎟️ *{raffle['name']}* (#{raffle_id})\n\n"
+        f"🎟️ *{raffle['name']}*\n\n"
         f"🔢 *Número total:* {st['total']}\n"
         f"💵 *Valor por número:* {float(raffle['price']):.2f} {CURRENCY}\n"
         f"🏆 *Premio:* {raffle['prize'] or 'Por anunciar'}\n"
@@ -1573,7 +1573,7 @@ async def new_raffle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     audit("new_raffle", f"Rifa #{rid}: {name}", update.effective_user.id)
     await update.effective_message.reply_text(
-        f"✅ Lista #{rid} creada: {name} (100 números).\n"
+        f"✅ Lista creada: {name} (100 números).\n"
         f"Precio por número: R$ {float(price):.2f}\nPorcentaje del premio: {percent}%\nPremio calculado: {prize_value}"
     )
 
@@ -1819,7 +1819,7 @@ async def process_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 return True
             flow["raffle_id"] = raffle_id
             flow["step"] = "winner_number"
-            await msg.reply_text(f"Lista seleccionada: {raffle['name']} (#{raffle_id}).\nAhora escribe el *número ganador*:", parse_mode="Markdown")
+            await msg.reply_text(f"Lista seleccionada: {raffle['name']}.\nAhora escribe el *número ganador*:", parse_mode="Markdown")
             return True
         elif step == "winner_number":
             number = int(value)
@@ -1983,6 +1983,20 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.text or msg.text.startswith("/"):
         return
     text = msg.text.strip()
+    normalized_menu_text = text.casefold().strip()
+    direct_actions = {
+        "🎟️ mis jugadas": "plays", "mis jugadas": "plays",
+        "🏆 mis premios": "prizes", "mis premios": "prizes",
+        "📚 resultados y ganadores": "history", "resultados y ganadores": "history",
+    }
+    menu_action = direct_actions.get(normalized_menu_text)
+    if not menu_action:
+        if normalized_menu_text.endswith("mis jugadas"):
+            menu_action = "plays"
+        elif normalized_menu_text.endswith("mis premios"):
+            menu_action = "prizes"
+        elif normalized_menu_text.endswith("resultados y ganadores"):
+            menu_action = "history"
 
     # Si el administrador abandona el registro PIX y pulsa otra opción del panel,
     # cancelar primero el modo de captura para que el texto no se interprete como llave.
@@ -2024,7 +2038,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         winner = None
         pix_winner_id = None
-    if pix_winner_id:
+    if pix_winner_id and not menu_action:
         pix_key = text.strip()
         if len(pix_key) < 3 or len(pix_key) > 200:
             await msg.reply_text("La llave PIX no parece válida. Envíala nuevamente (máximo 200 caracteres).")
@@ -2103,7 +2117,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user and not is_admin(update.effective_user.id) and text:
         with db() as con:
             amount_req = con.execute("SELECT * FROM requests WHERE user_id=? AND status='awaiting_payment_amount' ORDER BY created_at DESC LIMIT 1", (update.effective_user.id,)).fetchone()
-        if amount_req:
+        if amount_req and not menu_action:
             normalized = text.strip().upper().replace("R$", "").replace("BRL", "").replace("$", "").replace(" ", "")
             if "," in normalized:
                 normalized = normalized.replace(".", "").replace(",", ".")
@@ -2151,7 +2165,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "SELECT id FROM requests WHERE user_id=? AND status IN ('awaiting_payment_amount','awaiting_payment_receipt') ORDER BY created_at DESC LIMIT 1",
                 (update.effective_user.id,)
             ).fetchone()
-        if waiting_receipt:
+        if waiting_receipt and not menu_action:
             await msg.reply_text("📸 Para continuar es obligatorio adjuntar una foto del comprobante de transferencia. Envía la captura como imagen, no como texto.")
             return
 
@@ -2178,23 +2192,25 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await lists_cmd(update, context)
             return
-        direct_actions = {
-            "🎟️ Mis jugadas": "plays",
-            "🏆 Mis premios": "prizes",
-            "📚 Resultados y ganadores": "history",
-        }
         if text == "📲 Descargar aplicación":
             if DOWNLOAD_APP_URL:
                 await msg.reply_text("📲 Pulsa el enlace para descargar la aplicación:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Descargar aplicación", url=DOWNLOAD_APP_URL)]]))
             else:
                 await msg.reply_text("El administrador todavía debe proporcionar el enlace de descarga de la aplicación.")
             return
-        if text in direct_actions:
-            if direct_actions[text] == "history":
-                await send_public_results(msg)
-            else:
-                title, body = build_user_stats(update.effective_user.id, direct_actions[text])
-                await msg.reply_text(title + "\n\n" + body, parse_mode="Markdown", reply_markup=user_keyboard())
+        if menu_action:
+            try:
+                if menu_action == "history":
+                    await send_public_results(msg)
+                else:
+                    title, body = build_user_stats(update.effective_user.id, menu_action)
+                    await msg.reply_text(title + "\n\n" + body, parse_mode="Markdown", reply_markup=user_keyboard())
+            except Exception:
+                log.exception("No se pudo mostrar la opción del panel de usuario: %s", menu_action)
+                await msg.reply_text(
+                    "⚠️ No pude cargar esta información en este momento. Inténtalo nuevamente o avisa al administrador.",
+                    reply_markup=user_keyboard()
+                )
             return
         if text == "🆘 Ayuda / soporte":
             context.user_data["awaiting_support"] = True
@@ -2425,7 +2441,7 @@ def number_picker_text(raffle_id, user_id, page=0):
         return "<b>Esta lista ya no existe.</b>"
     chosen = ", ".join(f"{n:02d}" for n in selected) if selected else "Ninguno todavía"
     return (
-        f"<b>🎟️ {html.escape(raffle['name'])} · LISTA #{raffle_id}</b>\n"
+        f"<b>🎟️ {html.escape(raffle['name'])}</b>\n"
         f"💵 Valor por número: <b>{float(raffle['price']):.2f} {CURRENCY}</b>\n"
         f"🏆 Premio: <b>{html.escape(str(raffle['prize'] or 'Por anunciar'))}</b>\n"
         f"💎 Valor del premio: <b>{html.escape(str(raffle['prize_value'] or 'Por definir'))}</b>\n\n"
@@ -2833,7 +2849,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data.startswith("editraffle:"):
             await q.answer()
             await q.message.reply_text(
-                f"✏️ *MODIFICAR {raffle['name']}* (#{raffle_id})\n\n"
+                f"✏️ *MODIFICAR {raffle['name']}*\n\n"
                 f"Valor actual por número: *R$ {float(raffle['price']):.2f}*\n"
                 f"Porcentaje actual: *{raffle['prize_value'] or 'No definido'}*\n\n"
                 "¿Qué deseas modificar?",
@@ -2947,7 +2963,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Porcentaje seleccionado")
             await q.message.reply_text(f"✅ Porcentaje seleccionado para el premio: *{percent}%*", parse_mode="Markdown")
             await q.message.reply_text(
-                f"🎉 *Lista creada correctamente*\n\nID: *#{rid}*\nNombre: *{flow['name']}*\n"
+                f"🎉 *Lista creada correctamente*\n\nNombre: *{flow['name']}*\n"
                 f"Números: *100*\nValor por número: *R$ {flow['price']:.2f}*\n"
                 f"Porcentaje del premio: *{percent}%*\nPremio calculado: *{prize_value}*\n"
                 "Premio entregado mediante transferencia PIX.",
@@ -3711,7 +3727,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if row["status"] == old_status:
                     con.execute("UPDATE raffles SET status=? WHERE id=?", (new_status, raffle_id))
                 changed = 1
-                label = f"{row['name']} (#{raffle_id})"
+                label = f"{row['name']}"
                 if not block_action:
                     unlocked_names = [row["name"]]
         # El bloqueo general refleja si queda al menos una lista activa.
@@ -3927,7 +3943,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             winner_line = "🏆 <b>Usuario ganador:</b> Aún no hay ganador\n"
         await q.message.reply_text(
-            f"📊 <b>ESTADÍSTICAS · {html.escape(str(st['name']))} (#{raffle_id})</b>\n\n"
+            f"📊 <b>ESTADÍSTICAS · {html.escape(str(st['name']))}</b>\n\n"
             f"🔢 <b>Número total:</b> {st['total']}\n"
             f"💵 <b>Valor por número:</b> {st['price']:.2f} {CURRENCY}\n"
             f"🎁 <b>Premio:</b> {html.escape(str(raffle['prize'] or 'Por anunciar'))}\n"
@@ -3956,7 +3972,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await q.answer()
         context.user_data["admin_flow"] = {"kind": "winner", "step": "winner_number", "raffle_id": raffle_id}
-        await q.message.reply_text(f"Lista: *{raffle['name']}* (#{raffle_id}).\nEscribe el número ganador:", parse_mode="Markdown")
+        await q.message.reply_text(f"Lista: *{raffle['name']}*.\nEscribe el número ganador:", parse_mode="Markdown")
         return
 
     if data.startswith("resetchoose:"):
@@ -4031,7 +4047,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("Cancelar", callback_data="admin:back")
         ]])
         await q.edit_message_text(
-            f"⚠️ ¿Borrar definitivamente «{raffle['name']}» (#{raffle_id})? Se eliminarán sus números y registros asociados. Esta acción no se puede deshacer.",
+            f"⚠️ ¿Borrar definitivamente «{raffle['name']}»? Se eliminarán sus números y registros asociados. Esta acción no se puede deshacer.",
             reply_markup=keyboard
         )
         return
@@ -4056,7 +4072,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             con.execute("DELETE FROM raffles WHERE id=?", (raffle_id,))
         await q.answer()
         audit("delete_raffle", f"Lista #{raffle_id}: {raffle['name']}", uid)
-        await q.edit_message_text(f"🗑️ Lista «{raffle['name']}» (#{raffle_id}) borrada definitivamente.")
+        await q.edit_message_text(f"🗑️ Lista «{raffle['name']}» borrada definitivamente.")
         return
 
 
@@ -4203,7 +4219,7 @@ async def send_json(update, context):
         return
     with db() as con:
         data = {}
-        for table in ["raffles", "numbers", "requests", "purchases", "winners", "lottery_results", "audit_log"]:
+        for table in ["bot_settings", "pix_keys", "bot_users", "raffles", "numbers", "requests", "purchases", "winners", "lottery_results", "audit_log"]:
             rows = con.execute(f"SELECT * FROM {table}").fetchall()
             data[table] = [dict(r) for r in rows]
     payload = {"format": "telegram_raffle_backup_v1", "created_at": iso_now(), "data": data}
@@ -4211,7 +4227,7 @@ async def send_json(update, context):
     await context.bot.send_document(
         chat_id=update.effective_chat.id,
         document=InputFile(bio, filename=f"respaldo_rifas_{datetime.now().strftime('%Y%m%d_%H%M')}.json"),
-        caption="💾 Copia completa para restauración."
+        caption="💾 Copia completa para restauración: listas, números, jugadas, ganadores, usuarios, llaves PIX y ajustes."
     )
 
 
@@ -4240,7 +4256,7 @@ async def send_history(update, context, raffle_id):
         await target.reply_text("No se encontró esa lista.", reply_markup=admin_keyboard())
         return
     await target.reply_text(
-        f"📚 HISTORIAL COMPLETO · {html.escape(raffle['name'])} (#{raffle_id})\n"
+        f"📚 HISTORIAL COMPLETO · {html.escape(raffle['name'])}\n"
         f"Registros encontrados: {len(rows)}",
         parse_mode="HTML"
     )
@@ -4496,10 +4512,23 @@ async def restore_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         with db() as con:
             con.execute("BEGIN IMMEDIATE")
-            for table in ["winners", "purchases", "requests", "numbers", "lottery_results", "audit_log", "raffles"]:
+            # Se reemplazan los datos persistentes. Las reservas y referencias a mensajes
+            # temporales se limpian porque pueden dejar de existir tras un reinicio.
+            delete_order = [
+                "number_reservations", "number_picker_messages", "raffle_progress_messages",
+                "winners", "purchases", "requests", "numbers", "lottery_results",
+                "audit_log", "raffles", "bot_users", "pix_keys", "bot_settings"
+            ]
+            for table in delete_order:
+                if table in {"bot_users", "pix_keys", "bot_settings"} and table not in data:
+                    continue  # Compatibilidad con copias JSON antiguas.
                 con.execute(f"DELETE FROM {table}")
-            for table in ["raffles", "numbers", "requests", "purchases", "winners", "lottery_results", "audit_log"]:
-                rows = data[table]
+            insert_order = [
+                "bot_settings", "pix_keys", "bot_users", "raffles", "numbers",
+                "requests", "purchases", "winners", "lottery_results", "audit_log"
+            ]
+            for table in insert_order:
+                rows = data.get(table, [])
                 if rows:
                     cols = list(rows[0].keys())
                     sql = f"INSERT INTO {table} ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})"
@@ -4776,7 +4805,7 @@ def list_text(raffle_id):
         ).fetchall()
     s = stats(raffle_id)
     lines = [
-        f"🎟️ *{r['name']}* (Lista #{raffle_id})",
+        f"🎟️ *{r['name']}*",
         f"💵 Valor por número: *{float(r['price']):.2f} {CURRENCY}*",
         f"🏆 Premio: *{r['prize'] or 'Premio entregado mediante transferencia PIX'}*",
         f"💎 Valor del premio: *{r['prize_value'] or 'Por definir'}*",
